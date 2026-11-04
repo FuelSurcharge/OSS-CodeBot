@@ -1,0 +1,7 @@
+[package]
+name = "codebot-cli"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+codebot-core.workspace = true
+clap = { version = "4", features = ["derive"] }

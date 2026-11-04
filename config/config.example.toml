@@ -1,0 +1,2 @@
+provider = "rules"
+max_input_chars = 16000
