@@ -1,5 +1,7 @@
+use codebot_core::{ApiConfig, Backend, LocalConfig};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::{fs, path::Path};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,24 +17,33 @@ pub enum FontChoice {
 #[serde(default, deny_unknown_fields)]
 pub struct UiPreferences {
     pub font: FontChoice,
+    pub backend: Backend,
+    pub api_configs: BTreeMap<Backend, ApiConfig>,
+    pub local: LocalConfig,
 }
 
 impl UiPreferences {
     pub fn load(path: &Path) -> Result<Self, String> {
         match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)
-                .map_err(|_| "GUI設定の形式が不正なため、標準フォントで起動しました。".into()),
+                .map_err(|_| "GUI設定の形式が不正なため、標準設定で起動しました。".into()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(_) => Err("GUI設定を読み込めません。標準フォントで起動しました。".into()),
+            Err(_) => Err("GUI設定を読み込めません。標準設定で起動しました。".into()),
         }
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text = toml::to_string(self).map_err(|_| "フォント設定を保存できません。")?;
+        self.local.validate_source()?;
+        for config in self.api_configs.values() {
+            if !config.base_url.is_empty() {
+                config.validate_url()?;
+            }
+        }
+        let text = toml::to_string(self).map_err(|_| "GUI設定を保存できません。")?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).map_err(|_| "GUI設定フォルダを作成できません。")?;
         }
         fs::write(path, text)
-            .map_err(|_| "フォント設定を保存できません。この起動中のみ反映されます。".into())
+            .map_err(|_| "GUI設定を保存できません。この起動中のみ反映されます。".into())
     }
 }
 
@@ -116,7 +127,12 @@ mod tests {
             FontChoice::LineSeedJp
         );
         for font in [FontChoice::BizUdpGothic, FontChoice::LineSeedJp] {
-            UiPreferences { font }.save(&path).unwrap();
+            UiPreferences {
+                font,
+                ..Default::default()
+            }
+            .save(&path)
+            .unwrap();
             assert_eq!(UiPreferences::load(&path).unwrap().font, font);
         }
     }
@@ -134,5 +150,54 @@ mod tests {
         let dir = TestDir::new();
         assert!(UiPreferences::default().save(&dir.0).is_err());
         assert!(dir.0.is_dir());
+    }
+    #[test]
+    fn old_font_only_settings_and_api_profiles_roundtrip_without_keys() {
+        let dir = TestDir::new();
+        let path = dir.0.join("gui-preferences.toml");
+        fs::write(&path, "font = 'biz-udp-gothic'").unwrap();
+        let mut preferences = UiPreferences::load(&path).unwrap();
+        assert_eq!(preferences.font, FontChoice::BizUdpGothic);
+        assert_eq!(preferences.backend, Backend::Rules);
+        preferences.backend = Backend::Openai;
+        let mut api = Backend::Openai.defaults();
+        api.model = "test-model".into();
+        preferences.api_configs.insert(Backend::Openai, api);
+        preferences.save(&path).unwrap();
+        let restored = UiPreferences::load(&path).unwrap();
+        assert_eq!(restored.backend, Backend::Openai);
+        assert_eq!(restored.api_configs[&Backend::Openai].model, "test-model");
+        assert!(!fs::read_to_string(&path).unwrap().contains("api_key ="));
+        preferences
+            .api_configs
+            .get_mut(&Backend::Openai)
+            .unwrap()
+            .base_url = "https://example.com/?key=do-not-save".into();
+        assert!(preferences.save(&path).is_err());
+        assert!(!fs::read_to_string(&path).unwrap().contains("do-not-save"));
+    }
+    #[test]
+    fn local_model_source_and_runtime_settings_survive_restart() {
+        let dir = TestDir::new();
+        let path = dir.0.join("gui-preferences.toml");
+        let local = LocalConfig {
+            preset: codebot_core::LocalPreset::Glm53,
+            model_path: "models/local.gguf".into(),
+            server_path: "tools/llama-server".into(),
+            ..Default::default()
+        };
+        UiPreferences {
+            backend: Backend::Local,
+            local,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let restored = UiPreferences::load(&path).unwrap();
+        assert_eq!(restored.backend, Backend::Local);
+        assert_eq!(restored.local.preset, codebot_core::LocalPreset::Glm53);
+        assert_eq!(restored.local.model_path, "models/local.gguf");
+        assert_eq!(restored.local.server_path, "tools/llama-server");
+        assert!(!fs::read_to_string(path).unwrap().contains("hf_token"));
     }
 }

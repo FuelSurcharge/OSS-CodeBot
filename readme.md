@@ -1,6 +1,6 @@
 # OSS CodeBot
 
-Rust製のCLI・デスクトップGUI。共通コアで、APIキー不要の基本的なエラーログ診断を実行します。
+Rust製のCLI・デスクトップGUI。共通コアで、APIキー不要のログ診断、GGUF／公式safetensors形式のローカルAI、AI APIへの接続を実行します。
 Windows・macOS・Linux向けの構成です。各OSでのGUI操作検証は未完了です。
 
 ## 実行
@@ -18,7 +18,7 @@ CLIのみならGUIライブラリやディスプレイは不要です。GUIに�
 Linuxのビルド環境例（Debian/Ubuntu）:
 
 ```sh
-sudo apt-get install build-essential pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+sudo apt-get install build-essential pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev libssl-dev
 ```
 
 GUIの「設定」にTOMLファイルのパスを入力すると、その設定を実行時に読み込みます。
@@ -26,6 +26,8 @@ GUIの「設定」にTOMLファイルのパスを入力すると、その設定�
 `config.toml`を読み込み、存在しなければ既定値を使います。
 WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CONFIG_HOME配下です。
 明示した設定ファイルがない場合や設定が不正な場合はエラーになります。
+
+ローカルAIは「設定 → 処理方式 → ローカルAI」から使います。「実行方式」でllama.cpp（GGUF）またはTransformers（公式形式）を選びます。前者には `llama-server`、後者にはPythonとTransformers環境が必要です。[ローカルモデル設定](docs/LOCAL_MODELS.md) を参照してください。
 
 ## 現在の機能
 
@@ -37,10 +39,12 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - 会話中心のGUI、折りたたみ可能なサイドバー、チャット別の下書き、画面内設定
 - デフォルトは白基調。送信ボタンは青地に白い矢印、選択状態は淡い青で表示
 - 狭いウィンドウではチャット切替メニューを使用。入力例はありません。
-- 会話履歴はアプリ起動中のみ保持（終了時に消去）。診断は各入力単独で処理し、過去の会話は参照しません。
+- 会話履歴はアプリ起動中のみ保持（終了時に消去）。ローカル診断・APIとも各入力単独で処理し、過去の会話は送信しません。
 - 標準エラーへの処理完了／エラーログ（入力内容は記録しません）
 
-AI回答、コード生成、GitHub連携、自動ファイル編集は未実装です。
+OpenAI・Gemini・Claude・DeepSeek・Qwen・GLM・Grok・MiMo・KimiとカスタムAPIに対応しています。設定画面で処理方式・モデルID・APIキー・接続先を指定してください。APIキーは保存せず、環境変数からも取得できます。詳しくは [API設定](docs/API.md) を参照してください。
+
+GitHub連携、自動ファイル編集、ストリーミング、過去の会話を含むAPI送信は未実装です。
 ルールベースの案内は原因を確定するものではありません。
 
 ## 検証

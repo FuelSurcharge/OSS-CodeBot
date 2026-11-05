@@ -1,10 +1,13 @@
-use codebot_core::{execute, Config, Rules};
+use codebot_core::{execute_backend, ApiConfig, ApiProtocol, Backend, Config};
 use eframe::egui::{self, Color32, RichText};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::mpsc,
 };
+mod local_models;
 mod ui_preferences;
+use local_models::LocalModels;
 use ui_preferences::{apply_font, FontChoice, UiPreferences};
 
 const SHELL: Color32 = Color32::from_rgb(244, 247, 251);
@@ -45,6 +48,10 @@ struct App {
     sessions: Vec<Session>,
     active: usize,
     config_path: String,
+    backend: Backend,
+    api_configs: BTreeMap<Backend, ApiConfig>,
+    api_key: String,
+    local: LocalModels,
     font: FontChoice,
     preferences_path: Option<PathBuf>,
     preferences_error: Option<String>,
@@ -59,6 +66,10 @@ impl Default for App {
             sessions: vec![Session::default()],
             active: 0,
             config_path: String::new(),
+            backend: Backend::Rules,
+            api_configs: BTreeMap::new(),
+            api_key: String::new(),
+            local: LocalModels::default(),
             font: FontChoice::default(),
             preferences_path: None,
             preferences_error: None,
@@ -76,7 +87,12 @@ impl App {
             codebot_core::default_config_path().map(|p| p.with_file_name("gui-preferences.toml"));
         if let Some(path) = &app.preferences_path {
             match UiPreferences::load(path) {
-                Ok(preferences) => app.font = preferences.font,
+                Ok(preferences) => {
+                    app.font = preferences.font;
+                    app.backend = preferences.backend;
+                    app.api_configs = preferences.api_configs;
+                    app.local.config = preferences.local;
+                }
                 Err(e) => app.preferences_error = Some(e),
             }
         }
@@ -85,8 +101,18 @@ impl App {
     }
     fn save_font_choice(&mut self, ctx: &egui::Context) {
         apply_font(ctx, self.font);
+        self.save_preferences();
+    }
+    fn save_preferences(&mut self) {
         self.preferences_error = match &self.preferences_path {
-            Some(path) => UiPreferences { font: self.font }.save(path).err(),
+            Some(path) => UiPreferences {
+                font: self.font,
+                backend: self.backend,
+                api_configs: self.api_configs.clone(),
+                local: self.local.config.clone(),
+            }
+            .save(path)
+            .err(),
             None => Some("設定の保存先を取得できません。この起動中のみ反映されます。".into()),
         };
     }
@@ -99,11 +125,30 @@ impl App {
         if self.pending.is_some() || self.sessions[self.active].draft.trim().is_empty() {
             return;
         }
+        let local_connection = if self.backend == Backend::Local {
+            match self.local.connection() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    self.local.message = Some(e);
+                    self.settings = true;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let input = std::mem::take(&mut self.sessions[self.active].draft);
         self.sessions[self.active]
             .messages
             .push((true, input.clone()));
         let path = self.config_path.clone();
+        let backend = self.backend;
+        let api = self
+            .api_configs
+            .get(&backend)
+            .cloned()
+            .unwrap_or_else(|| backend.defaults());
+        let api_key = self.api_key.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some((self.active, rx));
         let ctx = ctx.clone();
@@ -114,7 +159,13 @@ impl App {
             } else {
                 Some(Path::new(path))
             })
-            .and_then(|c| execute(&c, &Rules, &input));
+            .and_then(|c| {
+                if let Some(connection) = local_connection {
+                    connection.respond(&c, &input)
+                } else {
+                    execute_backend(&c, backend, &api, Some(&api_key), &input)
+                }
+            });
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -196,15 +247,19 @@ impl App {
             });
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if self.pending.is_some() {
-                    "診断中…"
-                } else {
-                    "AI未接続。入力内容は外部に送信されません。"
-                })
-                .size(12.0)
-                .color(MUTED),
-            );
+            let notice = if self.pending.is_some() {
+                "応答を待っています…".to_string()
+            } else if self.backend == Backend::Rules {
+                "ローカル診断。入力内容は外部に送信されません。".into()
+            } else if self.backend == Backend::Local {
+                "ローカルAI。このPC上で推論します。".into()
+            } else {
+                format!(
+                    "{}へ入力を送信します（会話履歴は送信しません）。",
+                    self.backend.label()
+                )
+            };
+            ui.label(RichText::new(notice).size(12.0).color(MUTED));
             if ui.available_width() > 120.0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -292,9 +347,134 @@ impl App {
                 }
             });
     }
+    fn processing_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("処理方式")
+                .size(14.0)
+                .family(egui::FontFamily::Name("ui-bold".into())),
+        );
+        let previous = self.backend;
+        ui.add_enabled_ui(self.pending.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("backend")
+                .selected_text(self.backend.label())
+                .height(400.0)
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for backend in Backend::ALL {
+                        ui.selectable_value(&mut self.backend, backend, backend.label());
+                    }
+                });
+        });
+        if self.backend != previous {
+            self.api_key.clear();
+            if previous == Backend::Local {
+                self.local.stop();
+            }
+            if !matches!(self.backend, Backend::Rules | Backend::Local) {
+                self.api_configs
+                    .entry(self.backend)
+                    .or_insert_with(|| self.backend.defaults());
+            }
+            self.save_preferences();
+        }
+        if self.backend == Backend::Local {
+            if self.local.ui(ui, self.pending.is_some()) {
+                self.save_preferences();
+            }
+            if let Some(error) = &self.preferences_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            return;
+        }
+        if self.backend == Backend::Rules {
+            ui.label(
+                RichText::new("APIキー不要。入力は外部に送信されません。")
+                    .size(13.0)
+                    .color(MUTED),
+            );
+            return;
+        }
+        let api = self
+            .api_configs
+            .entry(self.backend)
+            .or_insert_with(|| self.backend.defaults());
+        ui.add_space(12.0);
+        let model = ui.label("モデルID（必須）");
+        ui.add(
+            egui::TextEdit::singleline(&mut api.model)
+                .desired_width(f32::INFINITY)
+                .hint_text("契約先で利用可能なモデルID"),
+        )
+        .labelled_by(model.id);
+        if self.backend == Backend::Custom {
+            ui.add_space(8.0);
+            egui::ComboBox::from_id_salt("protocol")
+                .selected_text(api.protocol.label())
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for protocol in [
+                        ApiProtocol::Openai,
+                        ApiProtocol::Gemini,
+                        ApiProtocol::Claude,
+                    ] {
+                        ui.selectable_value(&mut api.protocol, protocol, protocol.label());
+                    }
+                });
+        }
+        ui.add_space(8.0);
+        let endpoint = ui.label("APIベースURL（地域・契約に合わせて変更可能）");
+        let edited = ui
+            .add(egui::TextEdit::singleline(&mut api.base_url).desired_width(f32::INFINITY))
+            .labelled_by(endpoint.id);
+        if edited.changed() {
+            self.api_key.clear();
+        }
+        ui.label(
+            RichText::new(match api.protocol {
+                ApiProtocol::Openai => "末尾に /chat/completions を自動で追加します。",
+                ApiProtocol::Claude => "末尾に /messages を自動で追加します。",
+                ApiProtocol::Gemini => {
+                    "末尾に /models/{モデルID}:generateContent を自動で追加します。"
+                }
+            })
+            .size(12.0)
+            .color(MUTED),
+        );
+        ui.add_space(8.0);
+        let key = ui.label("APIキー（保存されません）");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.api_key)
+                .password(true)
+                .desired_width(f32::INFINITY)
+                .hint_text("この起動中だけ使用。未入力なら環境変数を参照"),
+        )
+        .labelled_by(key.id);
+        let env = ui.label("APIキーの環境変数名");
+        ui.add(egui::TextEdit::singleline(&mut api.api_key_env).desired_width(f32::INFINITY))
+            .labelled_by(env.id);
+        if self.backend == Backend::Custom {
+            ui.checkbox(&mut api.anonymous, "キーなし接続を許可（ローカルAPIなど）");
+        }
+        ui.horizontal(|ui| {
+            ui.label("出力トークン上限");
+            ui.add(egui::DragValue::new(&mut api.max_output_tokens).range(1..=128_000));
+            ui.label("タイムアウト（秒）");
+            ui.add(egui::DragValue::new(&mut api.timeout_seconds).range(1..=300));
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("送信ボタンを押すと、今回の入力が上記URLに送信されます。利用料金は各サービスに従います。").size(12.0).color(MUTED));
+        if ui.button("API設定を保存").clicked() {
+            self.save_preferences();
+        }
+        if let Some(error) = &self.preferences_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         ui.add_space(32.0);
         ui.label(RichText::new("設定").size(26.0));
+        ui.add_space(28.0);
+        self.processing_settings(ui);
         ui.add_space(28.0);
         ui.label(
             RichText::new("フォント")
@@ -341,18 +521,6 @@ impl App {
         .labelled_by(label.id);
         ui.add_space(8.0);
         ui.label(RichText::new("空欄の場合はOS標準の設定、または既定値を使います。\n変更は次の送信から適用されます。").size(13.0).color(MUTED));
-        ui.add_space(32.0);
-        ui.label(
-            RichText::new("処理方式")
-                .size(14.0)
-                .family(egui::FontFamily::Name("ui-bold".into())),
-        );
-        ui.label("ローカル診断（ルールベース）");
-        ui.label(
-            RichText::new("AI接続とコード編集は未対応です。")
-                .size(13.0)
-                .color(MUTED),
-        );
         ui.add_space(28.0);
         if ui.button("チャットに戻る").clicked() {
             self.settings = false;
@@ -362,7 +530,13 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
-        if self.settings && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.local.poll() {
+            self.save_preferences();
+        }
+        if self.settings
+            && !ctx.memory(|m| m.any_popup_open())
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             self.settings = false;
         }
         // Consume the shortcut before TextEdit to avoid inserting a newline on submit.
@@ -812,5 +986,16 @@ mod tests {
         assert_eq!(app.sessions[1].draft, "keep this input");
         assert!(app.sessions[1].messages.is_empty());
         assert_eq!(app.pending.as_ref().unwrap().0, 0);
+    }
+    #[test]
+    fn local_send_without_a_loaded_model_keeps_the_draft() {
+        let mut app = App::default();
+        app.backend = Backend::Local;
+        app.sessions[0].draft = "調査内容".into();
+        app.send(&egui::Context::default());
+        assert!(app.settings);
+        assert!(app.pending.is_none());
+        assert_eq!(app.sessions[0].draft, "調査内容");
+        assert!(app.sessions[0].messages.is_empty());
     }
 }

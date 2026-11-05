@@ -1,12 +1,12 @@
 use clap::Parser;
-use codebot_core::{execute, Config, Rules};
+use codebot_core::{execute_backend, Backend, Config};
 use std::{
     io::{self, Read},
     path::PathBuf,
     process::ExitCode,
 };
 #[derive(Parser)]
-#[command(version, about = "OSS CodeBot: offline log diagnostics")]
+#[command(version, about = "OSS CodeBot: local diagnostics and AI APIs")]
 struct Args {
     /// Input text; reads stdin when omitted
     input: Option<String>,
@@ -27,7 +27,8 @@ fn run() -> Result<(), String> {
             s
         }
     };
-    let output = execute(&c, &Rules, &input)?;
+    let backend = Backend::from_id(&c.provider).ok_or("対応していないプロバイダーです")?;
+    let output = execute_backend(&c, backend, &c.api, None, &input)?;
     println!("{output}");
     eprintln!("INFO request completed");
     Ok(())

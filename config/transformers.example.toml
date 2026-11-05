@@ -1,0 +1,17 @@
+provider = "local"
+max_input_chars = 16000
+
+[local]
+engine = "transformers"
+model_path = "/absolute/path/to/model-folder"
+python_path = "/absolute/path/to/.venv-transformers/bin/python"
+device = "auto"
+context_size = 4096
+max_output_tokens = 1024
+threads = 4
+startup_timeout_seconds = 180
+request_timeout_seconds = 120
+max_download_gib = 64
+# To download instead, leave model_path empty and set hf_url to owner/repo.
+# hf_url = "OWNER/REPO"
+# hf_revision = "main"

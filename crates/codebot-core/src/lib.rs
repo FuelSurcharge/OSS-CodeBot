@@ -1,4 +1,12 @@
 use serde::Deserialize;
+mod api;
+mod local;
+mod transformers;
+pub use api::{execute_backend, ApiConfig, ApiProtocol, ApiProvider, Backend};
+pub use local::{
+    download_hf_model, validate_gguf, DownloadProgress, LocalConfig, LocalConnection, LocalEngine,
+    LocalPreset, LocalServer, ModelDevice,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -9,12 +17,16 @@ use std::{
 pub struct Config {
     pub provider: String,
     pub max_input_chars: usize,
+    pub api: ApiConfig,
+    pub local: LocalConfig,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             provider: "rules".into(),
             max_input_chars: 16000,
+            api: ApiConfig::default(),
+            local: LocalConfig::default(),
         }
     }
 }
@@ -27,8 +39,8 @@ impl Config {
         // Do not include parser snippets: configuration can contain secrets.
         let c: Self =
             toml::from_str(text).map_err(|_| "設定のTOML形式または項目が不正です".to_string())?;
-        if c.provider != "rules" {
-            return Err("対応プロバイダーは rules のみです".into());
+        if Backend::from_id(&c.provider).is_none() {
+            return Err("対応していないプロバイダーです".into());
         }
         if !(1..=1_000_000).contains(&c.max_input_chars) {
             return Err("max_input_chars は1〜1000000です".into());

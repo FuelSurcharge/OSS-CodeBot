@@ -1,0 +1,14 @@
+provider = "local"
+max_input_chars = 16000
+
+[local]
+preset = "custom"
+model_path = "/absolute/path/to/model.gguf"
+server_path = "llama-server"
+context_size = 4096
+threads = 4
+gpu_layers = 0
+max_output_tokens = 1024
+startup_timeout_seconds = 180
+request_timeout_seconds = 120
+max_download_gib = 64
