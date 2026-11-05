@@ -412,6 +412,8 @@ version = "0.1.0"
 dependencies = [
  "codebot-core",
  "eframe",
+ "serde",
+ "toml",
 ]
 
 [[package]]
