@@ -65,3 +65,5 @@ GUIの標準フォントは **LINE Seed JP Regular 400** です。「設定 → 
 LINE Seed JPはGoogle Fonts公式の `ofl/lineseedjp`、BIZ UDPゴシックは `ofl/bizudpgothic` から取得しています。それぞれのSIL Open Font Licenseを [LINE Seed JP](assets/fonts/line-seed-jp/OFL.txt)・[BIZ UDPゴシック](assets/fonts/biz-udp-gothic/OFL.txt) に同梱しています。
 
 現在のGUI方針は [DESIGN.md](DESIGN.md)、参照したSkillと適用範囲は [docs/ui-skills/README.md](docs/ui-skills/README.md) に記載しています。
+
+今後の機能は[開発タスク一覧](docs/tasks/README.md)で管理します。優先度・完了条件・依存関係と、GitHubのIssue作成画面へのリンクを用意しています。
