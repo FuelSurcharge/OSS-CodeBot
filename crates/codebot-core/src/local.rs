@@ -1,4 +1,4 @@
-use crate::{execute, ApiConfig, ApiProvider, Backend, Config};
+use crate::{ApiConfig, ApiProvider, Backend, Config};
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -446,11 +446,15 @@ impl std::fmt::Debug for LocalConnection {
 }
 impl LocalConnection {
     pub fn respond(&self, config: &Config, input: &str) -> Result<String, String> {
-        execute(
-            config,
-            &ApiProvider::new(Backend::Custom, &self.api, Some(&self.key))?,
-            input,
-        )
+        self.respond_messages(config, &[crate::ChatMessage::user(input.trim())])
+    }
+    pub fn respond_messages(
+        &self,
+        config: &Config,
+        messages: &[crate::ChatMessage],
+    ) -> Result<String, String> {
+        crate::validate_messages(config, messages)?;
+        ApiProvider::new(Backend::Custom, &self.api, Some(&self.key))?.respond_messages(messages)
     }
 }
 impl LocalServer {
@@ -756,6 +760,9 @@ class Handler(BaseHTTPRequestHandler):
   assert self.headers['Authorization']=='Bearer '+key
   body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
   assert body['model']=='codebot-local'
+  if len(body['messages'])>1:
+   assert [m['role'] for m in body['messages']]==['user','assistant','user']
+   assert body['messages'][0]['content']=='previous question'
   data=json.dumps({'choices':[{'message':{'content':'mock local inference'}}]}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
  def log_message(self,*args):pass
@@ -773,6 +780,19 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
         assert!(!format!("{connection:?}").contains(&connection.key));
         assert_eq!(
             connection.respond(&Config::default(), "hello").unwrap(),
+            "mock local inference"
+        );
+        assert_eq!(
+            connection
+                .respond_messages(
+                    &Config::default(),
+                    &[
+                        crate::ChatMessage::user("previous question"),
+                        crate::ChatMessage::assistant("previous answer"),
+                        crate::ChatMessage::user("follow up"),
+                    ]
+                )
+                .unwrap(),
             "mock local inference"
         );
         let base = connection.api.base_url.clone();

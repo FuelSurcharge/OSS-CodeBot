@@ -7,7 +7,21 @@ pub fn show(
     cache: &mut CommonMarkCache,
     message_id: (usize, usize),
     text: &str,
-) {
+) -> Option<String> {
+    let links: Vec<String> = pulldown_cmark::Parser::new(text)
+        .filter_map(|event| {
+            if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) = event
+            {
+                if !dest_url.starts_with("https://") && !dest_url.starts_with("http://") {
+                    return Some(dest_url.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    for link in &links {
+        cache.add_link_hook(link.clone());
+    }
     let width = ui.available_width();
     ui.push_id(("markdown", message_id), |ui| {
         // Tables may have an intrinsic width larger than the conversation. Keep
@@ -23,6 +37,9 @@ pub fn show(
                     .show(ui, cache, text);
             });
     });
+    links
+        .into_iter()
+        .find(|link| cache.get_link_hook(link) == Some(true))
 }
 
 #[cfg(test)]
@@ -161,5 +178,60 @@ mod tests {
         );
         assert!(output.platform_output.commands.iter().any(|c| matches!(c,
             egui::OutputCommand::CopyText(text) if text == code)));
+    }
+    #[test]
+    fn source_links_are_handled_internally_instead_of_opening_a_browser() {
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let text = "[source.rs:2](codebot-file:source.rs#L2)";
+        let mut render = |events| {
+            let mut clicked = None;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 540.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        clicked = show(ui, &mut cache, (0, 0), text);
+                    });
+                },
+            );
+            (output, clicked)
+        };
+        render(vec![]);
+        let (output, _) = render(vec![]);
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    (t.galley.text() == "source.rs:2").then(|| t.pos + t.galley.size() * 0.5)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        render(vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let (output, clicked) = render(vec![egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(clicked.as_deref(), Some("codebot-file:source.rs#L2"));
+        assert!(output.platform_output.commands.is_empty());
     }
 }

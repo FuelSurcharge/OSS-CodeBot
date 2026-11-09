@@ -1,4 +1,4 @@
-use crate::{execute, Config, Provider, Rules};
+use crate::{execute, validate_messages, ChatMessage, ChatRole, Config, Provider, Rules};
 use reqwest::{
     blocking::Client,
     header::{HeaderMap, HeaderValue},
@@ -269,7 +269,14 @@ impl ApiProvider {
             key,
         })
     }
+    #[cfg(test)]
     fn request(&self, input: &str) -> Result<(Url, HeaderMap, Value), String> {
+        self.request_messages(&[ChatMessage::user(input)])
+    }
+    fn request_messages(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(Url, HeaderMap, Value), String> {
         let mut url = self.config.validate_url()?;
         let protocol = self.config.protocol;
         {
@@ -310,7 +317,7 @@ impl ApiProvider {
         let model = self.config.model.trim();
         let body = match protocol {
             ApiProtocol::Openai => {
-                let mut body = json!({"model":model,"messages":[{"role":"user","content":input}],"stream":false});
+                let mut body = json!({"model":model,"messages":messages,"stream":false});
                 let name = if self.backend == Backend::Openai {
                     "max_completion_tokens"
                 } else {
@@ -320,10 +327,19 @@ impl ApiProvider {
                 body
             }
             ApiProtocol::Claude => {
-                json!({"model":model,"max_tokens":self.config.max_output_tokens,"messages":[{"role":"user","content":input}],"stream":false})
+                json!({"model":model,"max_tokens":self.config.max_output_tokens,"messages":messages,"stream":false})
             }
             ApiProtocol::Gemini => {
-                json!({"contents":[{"role":"user","parts":[{"text":input}]}],"generationConfig":{"maxOutputTokens":self.config.max_output_tokens}})
+                let contents: Vec<_> = messages
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "role": if m.role == ChatRole::Assistant { "model" } else { "user" },
+                            "parts": [{"text":m.content}]
+                        })
+                    })
+                    .collect();
+                json!({"contents":contents,"generationConfig":{"maxOutputTokens":self.config.max_output_tokens}})
             }
         };
         Ok((url, headers, body))
@@ -331,7 +347,12 @@ impl ApiProvider {
 }
 impl Provider for ApiProvider {
     fn respond(&self, input: &str) -> Result<String, String> {
-        let (url, headers, body) = self.request(input)?;
+        self.respond_messages(&[ChatMessage::user(input)])
+    }
+}
+impl ApiProvider {
+    pub fn respond_messages(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        let (url, headers, body) = self.request_messages(messages)?;
         let client = Client::builder()
             .timeout(Duration::from_secs(self.config.timeout_seconds))
             .redirect(Policy::none())
@@ -422,15 +443,25 @@ pub fn execute_backend(
     key: Option<&str>,
     input: &str,
 ) -> Result<String, String> {
-    // Validate before constructing a client, so invalid input never reaches an API.
-    if input.trim().is_empty() {
-        return Err("入力が空です".into());
-    }
-    if input.trim().chars().count() > config.max_input_chars {
-        return Err("入力が文字数の上限を超えています".into());
-    }
+    execute_messages(
+        config,
+        backend,
+        api,
+        key,
+        &[ChatMessage::user(input.trim())],
+    )
+}
+
+pub fn execute_messages(
+    config: &Config,
+    backend: Backend,
+    api: &ApiConfig,
+    key: Option<&str>,
+    messages: &[ChatMessage],
+) -> Result<String, String> {
+    validate_messages(config, messages)?;
     if backend == Backend::Rules {
-        execute(config, &Rules, input)
+        execute(config, &Rules, &messages.last().unwrap().content)
     } else if backend == Backend::Local {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let mut local = config.local.clone();
@@ -444,9 +475,9 @@ pub fn execute_backend(
                     .into_owned();
         }
         let server = crate::LocalServer::start(&local, &cancel)?;
-        server.connection().respond(config, input)
+        server.connection().respond_messages(config, messages)
     } else {
-        execute(config, &ApiProvider::new(backend, api, key)?, input)
+        ApiProvider::new(backend, api, key)?.respond_messages(messages)
     }
 }
 
@@ -558,6 +589,21 @@ mod tests {
         status: &str,
         response: &str,
     ) -> (Result<String, String>, String) {
+        mock_request_messages(
+            backend,
+            protocol,
+            status,
+            response,
+            &[ChatMessage::user("input text")],
+        )
+    }
+    fn mock_request_messages(
+        backend: Backend,
+        protocol: ApiProtocol,
+        status: &str,
+        response: &str,
+        messages: &[ChatMessage],
+    ) -> (Result<String, String>, String) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let status = status.to_owned();
@@ -601,7 +647,7 @@ mod tests {
             ..Default::default()
         };
         let p = ApiProvider::new(backend, &config, Some("mock-secret-key")).unwrap();
-        let result = p.respond("input text");
+        let result = p.respond_messages(messages);
         // A failed client assertion must not wait forever for an uncontacted server.
         if result.as_ref().is_err_and(|e| e.contains("接続できません")) {
             panic!("mock server was not contacted: {result:?}");
@@ -642,6 +688,45 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains(&header.to_ascii_lowercase()));
             assert!(request.contains("input text"));
+        }
+    }
+    #[test]
+    fn history_roundtrips_preserve_roles_in_all_protocols() {
+        let messages = vec![
+            ChatMessage::user("私の名前は太郎"),
+            ChatMessage::assistant("太郎さんですね"),
+            ChatMessage::user("私の名前は？"),
+        ];
+        for (backend, protocol, reply) in [
+            (
+                Backend::Custom,
+                ApiProtocol::Openai,
+                r#"{"choices":[{"message":{"content":"太郎"}}]}"#,
+            ),
+            (
+                Backend::Claude,
+                ApiProtocol::Claude,
+                r#"{"content":[{"type":"text","text":"太郎"}]}"#,
+            ),
+            (
+                Backend::Gemini,
+                ApiProtocol::Gemini,
+                r#"{"candidates":[{"content":{"parts":[{"text":"太郎"}]}}]}"#,
+            ),
+        ] {
+            let (answer, request) =
+                mock_request_messages(backend, protocol, "200 OK", reply, &messages);
+            assert_eq!(answer.unwrap(), "太郎");
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if protocol == ApiProtocol::Gemini {
+                assert_eq!(body["contents"][1]["role"], "model");
+                assert_eq!(body["contents"][0]["parts"][0]["text"], "私の名前は太郎");
+            } else {
+                assert_eq!(body["messages"][1]["role"], "assistant");
+                assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+                assert_eq!(body["messages"][0]["content"], "私の名前は太郎");
+            }
         }
     }
     #[test]

@@ -40,12 +40,15 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - 回答のMarkdown表示（見出し・リスト・表・引用・リンク）、言語別のコードハイライト、コードブロック単位のコピー
 - デフォルトは白基調。送信ボタンは青地に白い矢印、選択状態は淡い青で表示
 - 狭いウィンドウではチャット切替メニューを使用。入力例はありません。
-- 会話履歴はアプリ起動中のみ保持（終了時に消去）。ローカル診断・APIとも各入力単独で処理し、過去の会話は送信しません。
+- 会話履歴の送信はGUIで選択可能。送信先変更時には再確認し、ルール診断は常に今回の入力だけを処理します。
+- CLIの`--interactive`で継続対話。`/clear`・`/trim`で送信履歴を減らせます。
+- チャット・下書きの任意保存と復元、名前変更・検索・確認付き削除、Markdown/JSON書き出し。[使い方](docs/CONVERSATIONS.md)
+- 作業フォルダのファイル・行範囲プレビューと明示的な添付、コード説明・エラー調査・レビュー、回答から参照行への移動。[使い方](docs/WORKSPACES.md)
 - 標準エラーへの処理完了／エラーログ（入力内容は記録しません）
 
 OpenAI・Gemini・Claude・DeepSeek・Qwen・GLM・Grok・MiMo・KimiとカスタムAPIに対応しています。設定画面で処理方式・モデルID・APIキー・接続先を指定してください。APIキーは保存せず、環境変数からも取得できます。詳しくは [API設定](docs/API.md) を参照してください。
 
-GitHub連携、自動ファイル編集、ストリーミング、過去の会話を含むAPI送信は未実装です。
+GitHub連携、自動ファイル編集、ストリーミングは未実装です。
 ルールベースの案内は原因を確定するものではありません。
 
 ## 検証
@@ -67,4 +70,4 @@ LINE Seed JPはGoogle Fonts公式の `ofl/lineseedjp`、BIZ UDPゴシックは `
 
 現在のGUI方針は [DESIGN.md](DESIGN.md)、参照したSkillと適用範囲は [docs/ui-skills/README.md](docs/ui-skills/README.md) に記載しています。
 
-今後の機能は[ISSUES.md](ISSUES.md)と[タスク別のMarkdown](docs/tasks/README.md)で管理します。優先度・進捗・完了条件・依存関係を記録し、実装後にファイルを更新してpushします。
+今後の機能は[AI-ISSUES.md](AI-ISSUES.md)と[タスク別のMarkdown](docs/tasks/README.md)で管理します。優先度・進捗・完了条件・依存関係を記録し、実装後にファイルを更新してpushします。

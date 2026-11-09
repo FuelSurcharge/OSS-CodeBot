@@ -20,6 +20,8 @@ pub struct UiPreferences {
     pub backend: Backend,
     pub api_configs: BTreeMap<Backend, ApiConfig>,
     pub local: LocalConfig,
+    pub save_chats: bool,
+    pub chat_archive_path: String,
 }
 
 impl UiPreferences {

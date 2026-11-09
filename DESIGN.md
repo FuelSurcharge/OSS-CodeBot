@@ -1,6 +1,6 @@
 # CodeBot desktop interface
 
-The desktop app is a local development assistant with CLI parity. Processing can use local rule-based diagnostics, a user-specified GGUF or safetensors model served by an owned llama.cpp or Transformers process, or configured AI APIs. The conversation is a visual history; each API request sends only its current input. No example prompts or invented integrations belong in the UI.
+The desktop app is a local development assistant with CLI parity. Processing can use local rule-based diagnostics, a user-specified GGUF or safetensors model served by an owned llama.cpp or Transformers process, or configured AI APIs. Conversation history is opt-in, scoped to one chat and destination, and requires renewed consent after changing the destination or restoring saved chats. Optional local archives preserve chats and drafts. File attachments are explicit, previewed snapshots of selected lines in one workspace. No example prompts or invented integrations belong in the UI.
 
 ## Direction
 

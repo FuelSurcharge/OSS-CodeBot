@@ -1,8 +1,11 @@
 use serde::Deserialize;
 mod api;
+mod conversation;
 mod local;
 mod transformers;
-pub use api::{execute_backend, ApiConfig, ApiProtocol, ApiProvider, Backend};
+mod workspace;
+pub use api::{execute_backend, execute_messages, ApiConfig, ApiProtocol, ApiProvider, Backend};
+pub use conversation::{validate_messages, ChatMessage, ChatRole};
 pub use local::{
     download_hf_model, validate_gguf, DownloadProgress, LocalConfig, LocalConnection, LocalEngine,
     LocalPreset, LocalServer, ModelDevice,
@@ -11,12 +14,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+pub use workspace::{citation_location, compose_input, AnalysisAction, Attachment, Workspace};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub provider: String,
     pub max_input_chars: usize,
+    pub max_context_chars: usize,
     pub api: ApiConfig,
     pub local: LocalConfig,
 }
@@ -25,6 +30,7 @@ impl Default for Config {
         Self {
             provider: "rules".into(),
             max_input_chars: 16000,
+            max_context_chars: 64000,
             api: ApiConfig::default(),
             local: LocalConfig::default(),
         }
@@ -44,6 +50,9 @@ impl Config {
         }
         if !(1..=1_000_000).contains(&c.max_input_chars) {
             return Err("max_input_chars は1〜1000000です".into());
+        }
+        if !(1..=4_000_000).contains(&c.max_context_chars) {
+            return Err("max_context_chars は1〜4000000です".into());
         }
         Ok(c)
     }

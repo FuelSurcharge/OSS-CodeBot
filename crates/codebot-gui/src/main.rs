@@ -1,13 +1,17 @@
-use codebot_core::{execute_backend, ApiConfig, ApiProtocol, Backend, Config};
+use codebot_core::{
+    execute_messages, validate_messages, ApiConfig, ApiProtocol, Backend, ChatMessage, Config,
+};
 use eframe::egui::{self, Color32, RichText};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::mpsc,
 };
+mod chat_storage;
 mod local_models;
 mod markdown;
 mod ui_preferences;
+mod workspace_panel;
 use local_models::LocalModels;
 use ui_preferences::{apply_font, FontChoice, UiPreferences};
 
@@ -24,13 +28,65 @@ const DISABLED: Color32 = Color32::from_rgb(219, 227, 238);
 const MEASURE: f32 = 680.0;
 const COMPOSER_WIDTH: f32 = 740.0;
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct Session {
+    label: String,
     messages: Vec<(bool, String)>,
     draft: String,
+    attachments: Vec<codebot_core::Attachment>,
+    analysis_action: Option<codebot_core::AnalysisAction>,
+    workspace_root: Option<String>,
+    history: Vec<ChatMessage>,
+    #[serde(skip)]
+    history_enabled: bool,
+    context_key: Option<String>,
+    #[serde(skip)]
+    in_flight_input: Option<String>,
+    #[serde(skip)]
+    retry_input: Option<String>,
+    #[serde(skip)]
+    notice: Option<String>,
 }
 impl Session {
+    fn request_messages(
+        &mut self,
+        config: &Config,
+        destination: &str,
+        rules: bool,
+    ) -> Result<Vec<ChatMessage>, String> {
+        let changed = self
+            .context_key
+            .as_deref()
+            .is_some_and(|key| key != destination);
+        if changed && self.history_enabled && !self.history.is_empty() && !rules {
+            self.history_enabled = false;
+            return Err("送信先またはモデルが変わりました。新しい送信先へ過去の会話を送る場合は「会話履歴を含める」を再度有効にしてください。下書きは保持しています。".into());
+        }
+        let mut messages = if self.history_enabled && !rules {
+            self.history.clone()
+        } else {
+            vec![]
+        };
+        let input = self
+            .analysis_action
+            .map(|action| format!("{}\n\n利用者の依頼:\n{}", action.prompt(), self.draft))
+            .unwrap_or_else(|| self.draft.clone());
+        messages.push(ChatMessage::user(codebot_core::compose_input(
+            &input,
+            &self.attachments,
+        )?));
+        validate_messages(config, &messages)?;
+        if changed && !self.history_enabled {
+            self.history.clear();
+        }
+        self.context_key = Some(destination.to_owned());
+        Ok(messages)
+    }
     fn title(&self) -> String {
+        if !self.label.trim().is_empty() {
+            return self.label.trim().to_owned();
+        }
         self.messages
             .first()
             .map(|(_, s)| {
@@ -43,6 +99,15 @@ impl Session {
                 }
             })
             .unwrap_or_else(|| "新しいチャット".into())
+    }
+    fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.title().to_lowercase().contains(&query)
+            || self
+                .messages
+                .iter()
+                .any(|(_, text)| text.to_lowercase().contains(&query))
     }
 }
 struct App {
@@ -61,6 +126,19 @@ struct App {
     copied: Option<(usize, usize)>,
     markdown_cache: egui_commonmark::CommonMarkCache,
     pending: Option<(usize, mpsc::Receiver<Result<String, String>>)>,
+    save_chats: bool,
+    sessions_dirty: bool,
+    archive_blocked: bool,
+    storage_error: Option<String>,
+    search: String,
+    delete_confirm: bool,
+    export_path: String,
+    export_overwrite: bool,
+    export_message: Option<String>,
+    archive_path_override: String,
+    archive_path_edit: String,
+    workspace_panel: workspace_panel::WorkspacePanel,
+    files_open: bool,
 }
 impl Default for App {
     fn default() -> Self {
@@ -80,10 +158,246 @@ impl Default for App {
             copied: None,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             pending: None,
+            save_chats: false,
+            sessions_dirty: false,
+            archive_blocked: false,
+            storage_error: None,
+            search: String::new(),
+            delete_confirm: false,
+            export_path: String::new(),
+            export_overwrite: false,
+            export_message: None,
+            archive_path_override: String::new(),
+            archive_path_edit: String::new(),
+            workspace_panel: workspace_panel::WorkspacePanel::default(),
+            files_open: false,
         }
     }
 }
 impl App {
+    fn archive_path(&self) -> Option<PathBuf> {
+        if !self.archive_path_override.trim().is_empty() {
+            let path = PathBuf::from(self.archive_path_override.trim());
+            return path.is_absolute().then_some(path);
+        }
+        self.preferences_path
+            .as_ref()
+            .map(|path| path.with_file_name("chats.json"))
+    }
+    fn restore_chats(&mut self, merge: bool) {
+        let result = self
+            .archive_path()
+            .ok_or_else(|| "チャット保存先を取得できません".to_owned())
+            .and_then(|path| chat_storage::load(&path));
+        match result {
+            Ok(Some(mut archive)) => {
+                if merge
+                    && self.sessions.iter().any(|s| {
+                        !s.messages.is_empty() || !s.draft.is_empty() || !s.label.is_empty()
+                    })
+                {
+                    let old_active = self.active;
+                    for (index, session) in self.sessions.drain(..).enumerate() {
+                        let position = archive.sessions.iter().position(|saved| {
+                            saved.label == session.label
+                                && saved.messages == session.messages
+                                && saved.draft == session.draft
+                                && saved.history == session.history
+                                && saved.context_key == session.context_key
+                                && saved.attachments == session.attachments
+                                && saved.analysis_action == session.analysis_action
+                                && saved.workspace_root == session.workspace_root
+                        });
+                        let position = match position {
+                            Some(position) => position,
+                            None => {
+                                archive.sessions.push(session);
+                                archive.sessions.len() - 1
+                            }
+                        };
+                        if index == old_active {
+                            self.active = position;
+                        }
+                    }
+                } else {
+                    self.active = archive.active;
+                }
+                self.sessions = archive.sessions;
+                self.archive_blocked = false;
+                self.storage_error = None;
+                self.sessions_dirty = merge;
+            }
+            Ok(None) => {
+                self.archive_blocked = false;
+                self.storage_error = None;
+                self.sessions_dirty = true;
+            }
+            Err(error) => {
+                self.archive_blocked = true;
+                self.storage_error = Some(error);
+            }
+        }
+    }
+    fn flush_chats(&mut self) {
+        if !self.save_chats || !self.sessions_dirty || self.archive_blocked {
+            return;
+        }
+        self.sessions_dirty = false;
+        self.storage_error = self
+            .archive_path()
+            .ok_or_else(|| "チャット保存先を取得できません".to_owned())
+            .and_then(|path| chat_storage::save(&path, &self.sessions, self.active))
+            .err();
+    }
+    fn delete_active_chat(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        self.sessions.remove(self.active);
+        if self.sessions.is_empty() {
+            self.sessions.push(Session::default());
+        }
+        self.active = self.active.min(self.sessions.len() - 1);
+        self.delete_confirm = false;
+        self.copied = None;
+        self.sessions_dirty = true;
+    }
+    fn chat_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("保存ファイルのフルパス（空欄はOS標準のchats.json）");
+        ui.text_edit_singleline(&mut self.archive_path_edit);
+        if ui
+            .add_enabled(self.pending.is_none(), egui::Button::new("保存先を適用"))
+            .clicked()
+        {
+            if self.archive_path_edit.trim().is_empty()
+                || Path::new(self.archive_path_edit.trim()).is_absolute()
+            {
+                self.archive_path_override = self.archive_path_edit.trim().to_owned();
+                self.save_preferences();
+                if self.save_chats {
+                    self.restore_chats(true);
+                }
+            } else {
+                self.storage_error = Some("保存先には絶対パスを指定してください".into());
+            }
+        }
+        if ui
+            .add_enabled(
+                self.pending.is_none(),
+                egui::Checkbox::new(&mut self.save_chats, "チャットと下書きをこのPCに保存する"),
+            )
+            .changed()
+        {
+            self.save_preferences();
+            if self.save_chats {
+                self.restore_chats(true);
+            }
+        }
+        ui.label("保存は任意です。無効にしても既存の保存ファイルは保持します。復元した会話の送信には再度チェックが必要です。");
+        if let Some(path) = self.archive_path() {
+            ui.label(format!("保存先: {}", path.display()));
+        }
+        if let Some(error) = &self.storage_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if ui
+            .add_enabled(
+                self.pending.is_none(),
+                egui::Button::new("保存・再読み込みを再試行"),
+            )
+            .clicked()
+        {
+            if self.archive_blocked {
+                self.restore_chats(true);
+            } else {
+                self.sessions_dirty = true;
+                self.flush_chats();
+            }
+        }
+        ui.add_space(8.0);
+        ui.label("このチャットの名前");
+        if ui
+            .text_edit_singleline(&mut self.sessions[self.active].label)
+            .changed()
+        {
+            self.sessions_dirty = true;
+        }
+        if ui
+            .add_enabled(
+                self.pending.is_none(),
+                egui::Button::new("このチャットを削除…"),
+            )
+            .clicked()
+        {
+            self.delete_confirm = true;
+        }
+        if self.delete_confirm {
+            ui.label(format!(
+                "「{}」を削除しますか？",
+                self.sessions[self.active].title()
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("削除する").clicked() {
+                    self.delete_active_chat();
+                }
+                if ui.button("キャンセル").clicked() {
+                    self.delete_confirm = false;
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.label("書き出し先のファイルパス");
+        ui.text_edit_singleline(&mut self.export_path);
+        ui.checkbox(
+            &mut self.export_overwrite,
+            "書き出し先の既存ファイルの上書きを許可する",
+        );
+        ui.horizontal(|ui| {
+            for (label, markdown) in [("Markdownで書き出す", true), ("JSONで書き出す", false)]
+            {
+                if ui
+                    .add_enabled(
+                        !self.export_path.trim().is_empty(),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    let path = Path::new(self.export_path.trim());
+                    // Exports must never replace the live archive or application settings.
+                    let protected = [self.archive_path(), self.preferences_path.clone()]
+                        .into_iter()
+                        .flatten()
+                        .any(|p| {
+                            p == path
+                                || p.canonicalize()
+                                    .ok()
+                                    .zip(path.canonicalize().ok())
+                                    .is_some_and(|(a, b)| a == b)
+                        });
+                    let result = if protected {
+                        Err(
+                            "アプリの保存・設定ファイルを上書きする書き出し先は指定できません"
+                                .into(),
+                        )
+                    } else {
+                        chat_storage::export(
+                            path,
+                            &self.sessions[self.active],
+                            markdown,
+                            self.export_overwrite,
+                        )
+                    };
+                    self.export_message = Some(match result {
+                        Ok(()) => "チャットを書き出しました".into(),
+                        Err(error) => error,
+                    });
+                }
+            }
+        });
+        if let Some(message) = &self.export_message {
+            ui.label(message);
+        }
+    }
     fn load(ctx: &egui::Context) -> Self {
         let mut app = Self::default();
         app.preferences_path =
@@ -95,9 +409,15 @@ impl App {
                     app.backend = preferences.backend;
                     app.api_configs = preferences.api_configs;
                     app.local.config = preferences.local;
+                    app.save_chats = preferences.save_chats;
+                    app.archive_path_override = preferences.chat_archive_path;
+                    app.archive_path_edit = app.archive_path_override.clone();
                 }
                 Err(e) => app.preferences_error = Some(e),
             }
+        }
+        if app.save_chats {
+            app.restore_chats(false);
         }
         apply_font(ctx, app.font);
         app
@@ -113,6 +433,8 @@ impl App {
                 backend: self.backend,
                 api_configs: self.api_configs.clone(),
                 local: self.local.config.clone(),
+                save_chats: self.save_chats,
+                chat_archive_path: self.archive_path_override.clone(),
             }
             .save(path)
             .err(),
@@ -123,6 +445,9 @@ impl App {
         self.sessions.push(Session::default());
         self.active = self.sessions.len() - 1;
         self.settings = false;
+        self.files_open = false;
+        self.delete_confirm = false;
+        self.sessions_dirty = true;
     }
     fn send(&mut self, ctx: &egui::Context) {
         if self.pending.is_some() || self.sessions[self.active].draft.trim().is_empty() {
@@ -140,11 +465,52 @@ impl App {
         } else {
             None
         };
+        let path = self.config_path.trim();
+        let config = match Config::load(if path.is_empty() {
+            None
+        } else {
+            Some(Path::new(path))
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                self.sessions[self.active].notice = Some(e);
+                return;
+            }
+        };
+        let destination = self.destination_key();
+        let messages = match self.sessions[self.active].request_messages(
+            &config,
+            &destination,
+            self.backend == Backend::Rules,
+        ) {
+            Ok(messages) => messages,
+            Err(e) => {
+                self.sessions[self.active].notice = Some(e);
+                return;
+            }
+        };
+        self.sessions[self.active].notice = None;
         let input = std::mem::take(&mut self.sessions[self.active].draft);
+        self.sessions[self.active].in_flight_input = Some(messages.last().unwrap().content.clone());
+        self.sessions_dirty = true;
+        let attachments = std::mem::take(&mut self.sessions[self.active].attachments);
+        self.sessions[self.active].analysis_action = None;
+        let input = if attachments.is_empty() {
+            input
+        } else {
+            format!(
+                "{}\n\n添付: {}",
+                input,
+                attachments
+                    .iter()
+                    .map(|a| format!("{}（{}–{}行）", a.path, a.first_line, a.last_line))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        };
         self.sessions[self.active]
             .messages
             .push((true, input.clone()));
-        let path = self.config_path.clone();
         let backend = self.backend;
         let api = self
             .api_configs
@@ -156,19 +522,11 @@ impl App {
         self.pending = Some((self.active, rx));
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let path = path.trim();
-            let result = Config::load(if path.is_empty() {
-                None
+            let result = if let Some(connection) = local_connection {
+                connection.respond_messages(&config, &messages)
             } else {
-                Some(Path::new(path))
-            })
-            .and_then(|c| {
-                if let Some(connection) = local_connection {
-                    connection.respond(&c, &input)
-                } else {
-                    execute_backend(&c, backend, &api, Some(&api_key), &input)
-                }
-            });
+                execute_messages(&config, backend, &api, Some(&api_key), &messages)
+            };
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -187,19 +545,65 @@ impl App {
         if let Some((id, result)) = result {
             let message = match result {
                 Ok(s) => {
+                    self.sessions[id].retry_input = None;
+                    if let Some(input) = self.sessions[id].in_flight_input.take() {
+                        self.sessions[id]
+                            .history
+                            .extend([ChatMessage::user(input), ChatMessage::assistant(s.clone())]);
+                    }
                     eprintln!("INFO request completed");
                     s
                 }
                 Err(e) => {
+                    self.sessions[id].retry_input = self.sessions[id].in_flight_input.clone();
+                    self.sessions[id].in_flight_input = None;
                     eprintln!("ERROR request failed");
                     format!("{e}\n設定と入力を確認して、もう一度送信してください。")
                 }
             };
             self.sessions[id].messages.push((false, message));
             self.pending = None;
+            self.sessions_dirty = true;
         }
     }
+    fn destination_key(&self) -> String {
+        if self.backend == Backend::Local {
+            return format!(
+                "local:{:?}:{}",
+                self.local.config.engine, self.local.config.model_path
+            );
+        }
+        let api = self
+            .api_configs
+            .get(&self.backend)
+            .cloned()
+            .unwrap_or_else(|| self.backend.defaults())
+            .resolved(self.backend);
+        format!(
+            "{}:{:?}:{}:{}",
+            self.backend.id(),
+            api.protocol,
+            api.base_url,
+            api.model
+        )
+    }
     fn composer(&mut self, ui: &mut egui::Ui) {
+        let mut remove = None;
+        for (index, attachment) in self.sessions[self.active].attachments.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "添付: {}（{}–{}行）",
+                    attachment.path, attachment.first_line, attachment.last_line
+                ));
+                if ui.small_button("外す").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            self.sessions[self.active].attachments.remove(index);
+            self.sessions_dirty = true;
+        }
         let enabled = self.pending.is_none() && !self.sessions[self.active].draft.trim().is_empty();
         let input_height = 2.0 * ui.text_style_height(&egui::TextStyle::Body);
         egui::Frame::new()
@@ -240,6 +644,9 @@ impl App {
                                             "メッセージ",
                                         )
                                     });
+                                    if response.changed() {
+                                        self.sessions_dirty = true;
+                                    }
                                 });
                         },
                     );
@@ -258,8 +665,13 @@ impl App {
                 "ローカルAI。このPC上で推論します。".into()
             } else {
                 format!(
-                    "{}へ入力を送信します（会話履歴は送信しません）。",
-                    self.backend.label()
+                    "{}へ{}を送信します。",
+                    self.backend.label(),
+                    if self.sessions[self.active].history_enabled {
+                        "入力と会話履歴"
+                    } else {
+                        "今回の入力だけ"
+                    }
                 )
             };
             ui.label(RichText::new(notice).size(12.0).color(MUTED));
@@ -277,8 +689,54 @@ impl App {
                 });
             }
         });
+        if self.backend != Backend::Rules {
+            let destination = self.destination_key();
+            ui.horizontal(|ui| {
+                let session = &mut self.sessions[self.active];
+                if ui
+                    .add_enabled(
+                        self.pending.is_none(),
+                        egui::Checkbox::new(&mut session.history_enabled, "会話履歴を含める"),
+                    )
+                    .changed()
+                    && session.history_enabled
+                {
+                    session.context_key = Some(destination);
+                    session.notice = None;
+                }
+                if ui
+                    .add_enabled(
+                        self.pending.is_none(),
+                        egui::Button::new("送信用の履歴を消去"),
+                    )
+                    .clicked()
+                {
+                    session.history.clear();
+                    session.notice = Some(
+                        "送信用の履歴を消去しました。画面の会話と下書きは保持しています。".into(),
+                    );
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{}文字",
+                        session
+                            .history
+                            .iter()
+                            .map(|m| m.content.chars().count())
+                            .sum::<usize>()
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
+                );
+            });
+        }
+        if let Some(notice) = &self.sessions[self.active].notice {
+            ui.label(RichText::new(notice).size(12.0).color(MUTED));
+        }
     }
     fn conversation(&mut self, ui: &mut egui::Ui) {
+        let mut reference = None;
+        let mut retry = false;
         egui::ScrollArea::vertical()
             .id_salt(("chat", self.active))
             .stick_to_bottom(true)
@@ -319,7 +777,11 @@ impl App {
                         let body = message
                             .strip_prefix("ルールベース診断（AI未使用）\n")
                             .unwrap_or(message);
-                        markdown::show(ui, &mut self.markdown_cache, (self.active, index), body);
+                        if let Some(uri) =
+                            markdown::show(ui, &mut self.markdown_cache, (self.active, index), body)
+                        {
+                            reference = Some(uri);
+                        }
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if icon_button(ui, Icon::Copy, "回答をコピー", true, false).clicked()
@@ -329,6 +791,17 @@ impl App {
                             }
                             if self.copied == Some((self.active, index)) {
                                 ui.label(RichText::new("コピーしました").size(12.0).color(MUTED));
+                            }
+                            if index + 1 == self.sessions[self.active].messages.len()
+                                && self.sessions[self.active].retry_input.is_some()
+                                && ui
+                                    .add_enabled(
+                                        self.pending.is_none(),
+                                        egui::Button::new("再試行"),
+                                    )
+                                    .clicked()
+                            {
+                                retry = true;
                             }
                         });
                     }
@@ -343,6 +816,26 @@ impl App {
                     ui.label(RichText::new("ログを確認しています…").color(MUTED));
                 }
             });
+        if let Some(uri) = reference {
+            if let Some(root) = &self.sessions[self.active].workspace_root {
+                self.workspace_panel.open_location(root, &uri);
+                self.files_open = true;
+            } else {
+                self.sessions[self.active].notice =
+                    Some("参照リンクに対応する作業フォルダが選択されていません".into());
+            }
+        }
+        if retry {
+            let session = &mut self.sessions[self.active];
+            if session.draft.trim().is_empty() && session.attachments.is_empty() {
+                session.draft = session.retry_input.clone().unwrap_or_default();
+                self.send(ui.ctx());
+            } else {
+                session.notice = Some(
+                    "未送信の下書きがあります。送信または退避してから再試行してください。".into(),
+                );
+            }
+        }
     }
     fn processing_settings(&mut self, ui: &mut egui::Ui) {
         ui.label(
@@ -459,7 +952,7 @@ impl App {
             ui.add(egui::DragValue::new(&mut api.timeout_seconds).range(1..=300));
         });
         ui.add_space(8.0);
-        ui.label(RichText::new("送信ボタンを押すと、今回の入力が上記URLに送信されます。利用料金は各サービスに従います。").size(12.0).color(MUTED));
+        ui.label(RichText::new("送信時は今回の入力と選択した添付を上記URLに送ります。履歴送信を有効にした場合は過去の会話も含みます。利用料金は各サービスに従います。").size(12.0).color(MUTED));
         if ui.button("API設定を保存").clicked() {
             self.save_preferences();
         }
@@ -471,6 +964,10 @@ impl App {
         ui.add_space(32.0);
         ui.label(RichText::new("設定").size(26.0));
         ui.add_space(28.0);
+        ui.collapsing("チャットの保存と管理", |ui| {
+            self.chat_settings(ui)
+        });
+        ui.add_space(16.0);
         self.processing_settings(ui);
         ui.add_space(28.0);
         ui.label(
@@ -538,6 +1035,7 @@ impl eframe::App for App {
         }
         // Consume the shortcut before TextEdit to avoid inserting a newline on submit.
         if !self.settings
+            && !self.files_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
         {
             self.send(ctx);
@@ -570,11 +1068,19 @@ impl eframe::App for App {
                     }
                     ui.add_space(30.0);
                     ui.label(RichText::new("チャット").size(12.0).color(MUTED));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("チャットを検索")
+                            .desired_width(192.0),
+                    );
                     ui.add_space(8.0);
                     egui::ScrollArea::vertical()
                         .max_height((ui.available_height() - 106.0).max(40.0))
                         .show(ui, |ui| {
                             for (index, session) in self.sessions.iter().enumerate() {
+                                if !session.matches(&self.search) {
+                                    continue;
+                                }
                                 let response = ui.add(
                                     egui::Button::new(RichText::new(session.title()).size(13.0))
                                         .truncate()
@@ -597,14 +1103,20 @@ impl eframe::App for App {
                                 if response.clicked() {
                                     self.active = index;
                                     self.settings = false;
+                                    self.delete_confirm = false;
+                                    self.sessions_dirty = true;
                                 }
                             }
                         });
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                         ui.label(
-                            RichText::new("履歴は終了時に消去されます")
-                                .size(11.0)
-                                .color(MUTED),
+                            RichText::new(if self.save_chats {
+                                "チャットをこのPCに保存します"
+                            } else {
+                                "履歴は終了時に消去されます"
+                            })
+                            .size(11.0)
+                            .color(MUTED),
                         );
                         ui.add_space(10.0);
                         if ui
@@ -645,10 +1157,19 @@ impl eframe::App for App {
                                     self.new_chat();
                                     ui.close_menu();
                                 }
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.search)
+                                        .hint_text("チャットを検索"),
+                                );
                                 for (i, s) in self.sessions.iter().enumerate() {
+                                    if !s.matches(&self.search) {
+                                        continue;
+                                    }
                                     if ui.selectable_label(i == self.active, s.title()).clicked() {
                                         self.active = i;
                                         self.settings = false;
+                                        self.delete_confirm = false;
+                                        self.sessions_dirty = true;
                                         ui.close_menu();
                                     }
                                 }
@@ -664,7 +1185,9 @@ impl eframe::App for App {
                             .color(MUTED),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("ファイル").clicked() { self.files_open = !self.files_open; self.settings = false; }
                             if icon_button(ui, Icon::Settings, "設定", true, false).clicked() {
+                                self.files_open = false;
                                 self.settings = !self.settings;
                             }
                             if icon_button(ui, Icon::New, "新しいチャット", true, false).clicked()
@@ -678,7 +1201,30 @@ impl eframe::App for App {
                     let left = bounds.center().x - width / 2.0;
                     let composer_width = (bounds.width() - 32.0).min(COMPOSER_WIDTH).max(200.0);
                     let composer_left = bounds.center().x - composer_width / 2.0;
-                    if self.settings {
+                    if self.files_open {
+                        let rect = egui::Rect::from_min_max(egui::pos2(left, bounds.top()), egui::pos2(left+width, bounds.bottom()));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                if let Some((attachment, action)) = self.workspace_panel.ui(ui) {
+                                    let session = &mut self.sessions[self.active];
+                                    session.history_enabled = false;
+                                    if session.workspace_root.as_deref().is_some_and(|root| root != attachment.root) {
+                                        session.attachments.clear(); session.history.clear();
+                                        session.notice = Some("作業フォルダを変更したため、送信用の履歴と以前の添付を消去しました。".into());
+                                    }
+                                    session.workspace_root = Some(attachment.root.clone());
+                                    if session.attachments.len() < 8 {
+                                        if session.attachments.iter().any(|a| a.root != attachment.root) { session.attachments.clear(); session.history.clear(); }
+                                        session.attachments.push(attachment);
+                                        session.analysis_action = Some(action);
+                                        if session.draft.trim().is_empty() { session.draft = format!("選択した範囲の{}をお願いします。", action.label()); }
+                                        self.sessions_dirty = true; self.files_open = false;
+                                    } else { session.notice = Some("添付は8ファイルまでです".into()); }
+                                }
+                                if ui.button("チャットに戻る").clicked() { self.files_open = false; }
+                            });
+                        });
+                    } else if self.settings {
                         let rect = egui::Rect::from_min_max(
                             egui::pos2(left, bounds.top()),
                             egui::pos2(left + width, bounds.bottom()),
@@ -704,7 +1250,18 @@ impl eframe::App for App {
                             self.composer(ui);
                         });
                     } else {
-                        let composer_top = bounds.bottom() - 108.0;
+                        let extra = if self.backend == Backend::Rules {
+                            0.0
+                        } else {
+                            40.0
+                        } + if self.sessions[self.active].notice.is_some() {
+                            80.0
+                        } else {
+                            0.0
+                        };
+                        let extra = extra + self.sessions[self.active].attachments.len() as f32 * 26.0;
+                        let composer_top =
+                            (bounds.bottom() - 108.0 - extra).max(bounds.top() + 80.0);
                         let history = egui::Rect::from_min_max(
                             egui::pos2(left, bounds.top() + 12.0),
                             egui::pos2(left + width, composer_top - 18.0),
@@ -722,6 +1279,7 @@ impl eframe::App for App {
                     }
                 });
             });
+        self.flush_chats();
     }
 }
 
@@ -904,6 +1462,107 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn archive_reload_preserves_corrupt_files_and_does_not_duplicate_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.preferences_path = Some(dir.path().join("gui-preferences.toml"));
+        app.save_chats = true;
+        app.sessions[0].draft = "日本語の下書き".into();
+        app.sessions_dirty = true;
+        app.flush_chats();
+        assert!(app.storage_error.is_none());
+        app.restore_chats(true);
+        app.restore_chats(true);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].draft, "日本語の下書き");
+        let path = app.archive_path().unwrap();
+        std::fs::write(&path, "broken data").unwrap();
+        app.restore_chats(true);
+        assert!(app.archive_blocked);
+        app.sessions_dirty = true;
+        app.flush_chats();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "broken data");
+    }
+    #[test]
+    fn delete_and_search_keep_a_valid_active_chat() {
+        let mut app = App::default();
+        app.sessions[0].label = "Rustの調査".into();
+        assert!(app.sessions[0].matches("RUST"));
+        assert!(!app.sessions[0].matches("other"));
+        app.new_chat();
+        app.delete_active_chat();
+        assert_eq!(app.active, 0);
+        assert_eq!(app.sessions[0].title(), "Rustの調査");
+        app.delete_active_chat();
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.active, 0);
+        assert!(app.sessions[0].messages.is_empty());
+    }
+    #[test]
+    fn history_is_opt_in_and_changed_destinations_require_a_new_opt_in() {
+        let mut session = Session::default();
+        session.history = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+        ];
+        session.context_key = Some("provider A".into());
+        session.draft = "new question".into();
+        assert_eq!(
+            session
+                .request_messages(&Config::default(), "provider A", false)
+                .unwrap()
+                .len(),
+            1
+        );
+        session.history_enabled = true;
+        assert_eq!(
+            session
+                .request_messages(&Config::default(), "provider A", false)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(session
+            .request_messages(&Config::default(), "provider B", false)
+            .is_err());
+        assert!(!session.history_enabled);
+        assert_eq!(session.draft, "new question");
+        assert_eq!(session.history.len(), 2);
+        session.context_key = Some("provider B".into());
+        session.history_enabled = true;
+        assert_eq!(
+            session
+                .request_messages(&Config::default(), "provider B", false)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+    #[test]
+    fn failed_answers_never_enter_the_sendable_history() {
+        let mut app = App::default();
+        app.sessions[0].in_flight_input = Some("failed request".into());
+        let (tx, rx) = mpsc::channel();
+        app.pending = Some((0, rx));
+        tx.send(Err("HTTP 503".into())).unwrap();
+        app.poll();
+        assert!(app.sessions[0].history.is_empty());
+        app.sessions[0].in_flight_input = Some("good request".into());
+        let (tx, rx) = mpsc::channel();
+        app.pending = Some((0, rx));
+        tx.send(Ok("answer".into())).unwrap();
+        app.new_chat();
+        app.poll();
+        assert_eq!(
+            app.sessions[0].history,
+            vec![
+                ChatMessage::user("good request"),
+                ChatMessage::assistant("answer")
+            ]
+        );
+        assert!(app.sessions[1].history.is_empty());
+    }
 
     #[test]
     fn new_chat_preserves_existing_drafts_and_returns_from_settings() {

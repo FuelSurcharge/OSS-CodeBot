@@ -119,6 +119,19 @@ def download():
     emit("done", path=str(root))
 
 
+def valid_messages(messages):
+    return (isinstance(messages, list) and bool(messages) and len(messages) % 2 == 1 and
+            all(isinstance(m, dict) and m.get("role") == ("user" if i % 2 == 0 else "assistant")
+                and isinstance(m.get("content"), str) and bool(m["content"].strip())
+                for i, m in enumerate(messages)))
+
+
+def plain_chat(messages):
+    if len(messages) == 1:
+        return messages[0]["content"]
+    return "\n\n".join(f'{m["role"]}: {m["content"]}' for m in messages) + "\n\nassistant:"
+
+
 def serve(args):
     state = {"status": "loading", "code": None}
     model = tokenizer = torch = None
@@ -178,8 +191,7 @@ def serve(args):
                     return self.reply(413, {"error": "input_size"})
                 request = json.loads(self.rfile.read(size))
                 messages = request["messages"]
-                if (not isinstance(messages, list) or not messages or
-                    any(m.get("role") != "user" or not isinstance(m.get("content"), str) for m in messages)):
+                if not valid_messages(messages):
                     return self.reply(400, {"error": "input_format"})
                 budget = request.get("max_tokens", 1024)
                 if not isinstance(budget, int) or not 0 < budget < args.ctx_size:
@@ -189,7 +201,7 @@ def serve(args):
                         encoded = tokenizer.apply_chat_template(messages, add_generation_prompt=True,
                             tokenize=True, return_tensors="pt", return_dict=True)
                     else:
-                        encoded = tokenizer(messages[-1]["content"], return_tensors="pt")
+                        encoded = tokenizer(plain_chat(messages), return_tensors="pt")
                     if encoded["input_ids"].shape[-1] + budget > args.ctx_size:
                         return self.reply(400, {"error": "context_limit"})
                     encoded = {k: v.to(model.device) for k, v in encoded.items()}

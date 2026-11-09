@@ -16,6 +16,15 @@ spec.loader.exec_module(runtime)
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_multi_turn_validation_and_template_free_transcript(self):
+        messages = [{"role":"user", "content":"first"}, {"role":"assistant", "content":"answer"}, {"role":"user", "content":"second"}]
+        self.assertTrue(runtime.valid_messages(messages))
+        self.assertIn("assistant: answer", runtime.plain_chat(messages))
+        self.assertIn("user: first", runtime.plain_chat(messages))
+        self.assertTrue(runtime.plain_chat(messages).endswith("assistant:"))
+        for invalid in [[], messages[:2], [None], [{"role":"system","content":"instructions"}], [{"role":"user","content":" "}]]:
+            self.assertFalse(runtime.valid_messages(invalid))
+
     def test_only_data_assets_are_selected(self):
         for name in ["config.json", "model-00001-of-00002.safetensors", "tokenizer.json", "vocab.txt", "chat_template.jinja"]:
             self.assertTrue(runtime.selected_file(name))
