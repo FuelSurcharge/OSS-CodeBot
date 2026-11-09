@@ -46,6 +46,28 @@ pub struct GitPanel {
     focus_status: bool,
 }
 impl GitPanel {
+    pub fn prepare_issue_branch(
+        &mut self,
+        ctx: &egui::Context,
+        root: Option<&str>,
+        branch: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("Git処理の完了後にブランチを準備してください".into());
+        }
+        let root = root.ok_or("先にファイル画面から作業フォルダを選択してください")?;
+        self.root = root.to_owned();
+        self.new_branch = branch.to_owned();
+        self.start(
+            ctx,
+            Some(GitOperation::CreateBranch {
+                name: branch.into(),
+            }),
+        );
+        self.message = Some(format!("参照Issue：{source}"));
+        Ok(())
+    }
     pub fn is_busy(&self) -> bool {
         self.task.is_some()
     }
@@ -417,7 +439,7 @@ impl GitPanel {
         ui.add(egui::Label::new("Gitのフック・外部diff・署名を実行しません。LFS等のフィルターを持つファイルは外部Gitでステージしてください。").wrap());
     }
 }
-fn diff(ui: &mut egui::Ui, id: &str, text: &str) {
+pub(crate) fn diff(ui: &mut egui::Ui, id: &str, text: &str) {
     if text.is_empty() {
         ui.label("差分はありません。");
         return;

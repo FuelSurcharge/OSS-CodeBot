@@ -16,6 +16,7 @@ mod change_panel;
 mod chat_storage;
 mod command_panel;
 mod git_panel;
+mod github_panel;
 mod local_diagnostics;
 mod local_models;
 mod markdown;
@@ -159,6 +160,8 @@ struct App {
     changes_open: bool,
     commands_open: bool,
     git_open: bool,
+    github_open: bool,
+    github_panel: github_panel::GithubPanel,
     git_panel: git_panel::GitPanel,
     command_panel: command_panel::CommandPanel,
 }
@@ -167,6 +170,7 @@ impl Drop for App {
         self.stop_generation();
         self.command_panel.shutdown();
         self.git_panel.shutdown();
+        self.github_panel.shutdown();
         self.pending = None;
         self.flush_chats();
     }
@@ -209,6 +213,8 @@ impl Default for App {
             changes_open: false,
             commands_open: false,
             git_open: false,
+            github_open: false,
+            github_panel: github_panel::GithubPanel::default(),
             git_panel: git_panel::GitPanel::default(),
             command_panel: command_panel::CommandPanel::default(),
         }
@@ -464,6 +470,7 @@ impl App {
                     app.backend = preferences.backend;
                     app.api_configs = preferences.api_configs;
                     app.local.config = preferences.local;
+                    app.github_panel.config = preferences.github;
                     app.save_chats = preferences.save_chats;
                     app.archive_path_override = preferences.chat_archive_path;
                     app.archive_path_edit = app.archive_path_override.clone();
@@ -498,6 +505,7 @@ impl App {
                 chat_archive_path: self.archive_path_override.clone(),
                 last_change_root,
                 last_change_journal,
+                github: self.github_panel.config.clone(),
             }
             .save(path)
             .err(),
@@ -512,14 +520,18 @@ impl App {
         self.changes_open = false;
         self.commands_open = false;
         self.git_open = false;
+        self.github_open = false;
         self.delete_confirm = false;
         self.sessions_dirty = true;
     }
     fn send(&mut self, ctx: &egui::Context) {
-        if self.change_panel.is_busy() || self.command_panel.is_busy() || self.git_panel.is_busy() {
-            self.sessions[self.active].notice = Some(
-                "ファイル操作・コマンドの完了後に送信してください。下書きは保持しています。".into(),
-            );
+        if self.change_panel.is_busy()
+            || self.command_panel.is_busy()
+            || self.git_panel.is_busy()
+            || self.github_panel.is_busy()
+        {
+            self.sessions[self.active].notice =
+                Some("実行中の処理が終わってから送信してください。下書きは保持しています。".into());
             return;
         }
         if self.pending.is_some() || self.sessions[self.active].draft.trim().is_empty() {
@@ -739,6 +751,7 @@ impl App {
             && !self.change_panel.is_busy()
             && !self.command_panel.is_busy()
             && !self.git_panel.is_busy()
+            && !self.github_panel.is_busy()
             && !self.sessions[self.active].draft.trim().is_empty();
         let input_height = 2.0 * ui.text_style_height(&egui::TextStyle::Body);
         egui::Frame::new()
@@ -1196,6 +1209,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
+        self.github_panel.poll();
         for root in [
             self.change_panel.poll(),
             self.command_panel.poll(),
@@ -1231,6 +1245,7 @@ impl eframe::App for App {
             && !self.changes_open
             && !self.commands_open
             && !self.git_open
+            && !self.github_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
         {
             self.send(ctx);
@@ -1302,6 +1317,7 @@ impl eframe::App for App {
                                     self.changes_open = false;
                                     self.commands_open = false;
                                     self.git_open = false;
+                                    self.github_open = false;
                                     self.delete_confirm = false;
                                     self.sessions_dirty = true;
                                 }
@@ -1336,6 +1352,7 @@ impl eframe::App for App {
                             self.changes_open = false;
                             self.commands_open = false;
                             self.git_open = false;
+                            self.github_open = false;
                         }
                     });
                 });
@@ -1372,7 +1389,7 @@ impl eframe::App for App {
                                         self.active = i;
                                         self.settings = false;
                                         self.files_open = false;
-                                        self.changes_open = false; self.commands_open = false; self.git_open=false;
+                                        self.changes_open = false; self.commands_open = false; self.git_open=false; self.github_open=false;
                                         self.delete_confirm = false;
                                         self.sessions_dirty = true;
                                         ui.close_menu();
@@ -1380,22 +1397,23 @@ impl eframe::App for App {
                                 }
                             });
                         }
-                        let title = if self.settings { "設定".into() } else if self.git_open { "Git".into() } else if self.commands_open { "コマンドの実行".into() } else if self.changes_open { "変更の確認".into() }
+                        let title = if self.settings { "設定".into() } else if self.github_open { "GitHub".into() } else if self.git_open { "Git".into() } else if self.commands_open { "コマンドの実行".into() } else if self.changes_open { "変更の確認".into() }
                             else if self.files_open { "参照ファイル".into() } else { self.sessions[self.active].title() };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if icon_button(ui, Icon::Settings, "設定", true, false).clicked() {
                                 self.files_open = false;
-                                self.changes_open = false; self.commands_open = false; self.git_open=false;
+                                self.changes_open = false; self.commands_open = false; self.git_open=false; self.github_open=false;
                                 self.settings = !self.settings;
                             }
                             if icon_button(ui, Icon::New, "新しいチャット", true, false).clicked()
                             {
                                 self.new_chat();
                             }
-                            if ui.button("ファイル").clicked() { self.files_open = !self.files_open; self.settings = false; self.changes_open = false; self.commands_open = false; self.git_open=false; }
-                            if ui.button("変更").clicked() { self.changes_open = !self.changes_open; self.settings = false; self.files_open = false; self.commands_open=false; self.git_open=false; }
-                            if ui.button("実行").clicked() { self.commands_open = !self.commands_open; self.settings=false; self.files_open=false; self.changes_open=false; self.git_open=false; self.command_panel.set_initial_root(self.sessions[self.active].workspace_root.as_deref()); }
-                            if ui.button("Git").clicked() { self.git_open=!self.git_open; self.settings=false; self.files_open=false; self.changes_open=false; self.commands_open=false; self.git_panel.set_initial_root(self.sessions[self.active].workspace_root.as_deref()); }
+                            if ui.button("ファイル").clicked() { self.files_open = !self.files_open; self.settings = false; self.changes_open = false; self.commands_open = false; self.git_open=false; self.github_open=false; }
+                            if ui.button("変更").clicked() { self.changes_open = !self.changes_open; self.settings = false; self.files_open = false; self.commands_open=false; self.git_open=false; self.github_open=false; }
+                            if ui.button("実行").clicked() { self.commands_open = !self.commands_open; self.settings=false; self.files_open=false; self.changes_open=false; self.git_open=false; self.github_open=false; self.command_panel.set_initial_root(self.sessions[self.active].workspace_root.as_deref()); }
+                            if ui.button("Git").clicked() { self.git_open=!self.git_open; self.github_open=false; self.settings=false; self.files_open=false; self.changes_open=false; self.commands_open=false; self.git_panel.set_initial_root(self.sessions[self.active].workspace_root.as_deref()); }
+                            if ui.button("GitHub").clicked() { self.github_open=!self.github_open; self.git_open=false; self.settings=false; self.files_open=false; self.changes_open=false; self.commands_open=false; }
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 ui.add(egui::Label::new(RichText::new(title).size(13.0).color(MUTED)).truncate());
                             });
@@ -1406,33 +1424,55 @@ impl eframe::App for App {
                     let left = bounds.center().x - width / 2.0;
                     let composer_width = (bounds.width() - 32.0).min(COMPOSER_WIDTH).max(200.0);
                     let composer_left = bounds.center().x - composer_width / 2.0;
-                    if self.git_open {
+                    if self.github_open {
                         let rect=egui::Rect::from_min_max(egui::pos2(left,bounds.top()),egui::pos2(left+width,bounds.bottom()));
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect),|ui| {
                             egui::ScrollArea::vertical().show(ui,|ui| {
-                                self.git_panel.ui(ui,self.pending.is_none() && !self.change_panel.is_busy() && !self.command_panel.is_busy());
-                                if ui.button("チャットに戻る").clicked() {self.git_open=false;}
+                                if let Some(action)=self.github_panel.ui(ui,self.pending.is_none() && !self.change_panel.is_busy() && !self.command_panel.is_busy() && !self.git_panel.is_busy()) {
+                                    match action {
+                                        github_panel::Action::Save=>self.save_preferences(),
+                                        github_panel::Action::Attach(text)=>{
+                                            let mut limited=text.chars().take(12000).collect::<String>();if text.chars().count()>12000 {limited.push_str("\n（12000文字以降を省略）");}
+                                            let session=&mut self.sessions[self.active];if !session.draft.is_empty() {session.draft.push_str("\n\n");}session.draft.push_str(&limited);session.history_enabled=false;session.notice=Some("GitHubの資料を下書きに追加しました。内容を確認して送信してください。".into());self.sessions_dirty=true;self.github_open=false;
+                                        }
+                                        github_panel::Action::Branch{branch,source}=>{
+                                            match self.git_panel.prepare_issue_branch(ui.ctx(),self.sessions[self.active].workspace_root.as_deref(),&branch,&source) {
+                                                Ok(())=>{self.git_open=true;self.github_open=false;},Err(error)=>self.github_panel.report_message(error)
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(error)=&self.preferences_error {ui.colored_label(ui.visuals().error_fg_color,error);}
+                                if ui.button("チャットに戻る").clicked() {self.github_open=false;}
+                            });
+                        });
+                    } else if self.git_open {
+                        let rect=egui::Rect::from_min_max(egui::pos2(left,bounds.top()),egui::pos2(left+width,bounds.bottom()));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect),|ui| {
+                            egui::ScrollArea::vertical().show(ui,|ui| {
+                                self.git_panel.ui(ui,self.pending.is_none() && !self.change_panel.is_busy() && !self.command_panel.is_busy() && !self.github_panel.is_busy());
+                                if ui.button("チャットに戻る").clicked() {self.git_open=false; self.github_open=false;}
                             });
                         });
                     } else if self.commands_open {
                         let rect=egui::Rect::from_min_max(egui::pos2(left,bounds.top()),egui::pos2(left+width,bounds.bottom()));
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect),|ui| {
                             egui::ScrollArea::vertical().show(ui,|ui| {
-                                if let Some(output)=self.command_panel.ui(ui,self.pending.is_none() && !self.change_panel.is_busy() && !self.git_panel.is_busy()) {
+                                if let Some(output)=self.command_panel.ui(ui,self.pending.is_none() && !self.change_panel.is_busy() && !self.git_panel.is_busy() && !self.github_panel.is_busy()) {
                                     let session=&mut self.sessions[self.active];
                                     if !session.draft.is_empty() {session.draft.push_str("\n\n");}
-                                    session.draft.push_str(&output);session.history_enabled=false;self.sessions_dirty=true;self.commands_open=false; self.git_open=false;
+                                    session.draft.push_str(&output);session.history_enabled=false;self.sessions_dirty=true;self.commands_open=false; self.git_open=false; self.github_open=false;
                                 }
-                                if ui.button("チャットに戻る").clicked() {self.commands_open=false; self.git_open=false;}
+                                if ui.button("チャットに戻る").clicked() {self.commands_open=false; self.git_open=false; self.github_open=false;}
                             });
                         });
                     } else if self.changes_open {
                         let rect = egui::Rect::from_min_max(egui::pos2(left,bounds.top()),egui::pos2(left+width,bounds.bottom()));
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                self.change_panel.ui(ui,self.pending.is_none() && !self.command_panel.is_busy() && !self.git_panel.is_busy());
+                                self.change_panel.ui(ui,self.pending.is_none() && !self.command_panel.is_busy() && !self.git_panel.is_busy() && !self.github_panel.is_busy());
                                 if let Some(error) = &self.preferences_error { ui.colored_label(ui.visuals().error_fg_color,error); }
-                                if ui.button("チャットに戻る").clicked() { self.changes_open = false; self.commands_open = false; self.git_open=false; }
+                                if ui.button("チャットに戻る").clicked() { self.changes_open = false; self.commands_open = false; self.git_open=false; self.github_open=false; }
                             });
                         });
                     } else if self.files_open {

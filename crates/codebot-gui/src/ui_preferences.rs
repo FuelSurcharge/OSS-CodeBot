@@ -1,4 +1,4 @@
-use codebot_core::{ApiConfig, Backend, LocalConfig};
+use codebot_core::{ApiConfig, Backend, GithubConfig, LocalConfig};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,6 +24,7 @@ pub struct UiPreferences {
     pub chat_archive_path: String,
     pub last_change_root: String,
     pub last_change_journal: String,
+    pub github: GithubConfig,
 }
 
 impl UiPreferences {
@@ -36,6 +37,12 @@ impl UiPreferences {
         }
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        let mut github = self.github.clone();
+        if github.repository.trim().is_empty() {
+            github.repository = "configuration/validation".into();
+        }
+        codebot_core::GithubClient::new(&github, Some("configuration-validation"))
+            .map_err(|e| e.to_string())?;
         self.local.validate_source()?;
         for config in self.api_configs.values() {
             if !config.base_url.is_empty() {
@@ -95,6 +102,27 @@ pub fn apply_font(ctx: &egui::Context, choice: FontChoice) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn github_connection_preferences_roundtrip_without_credentials_or_post_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.toml");
+        let preferences = UiPreferences {
+            github: GithubConfig {
+                repository: "owner/repo".into(),
+                api_url: "https://api.github.com".into(),
+                token_env: "GITHUB_TOKEN".into(),
+                timeout_seconds: 45,
+            },
+            ..Default::default()
+        };
+        preferences.save(&path).unwrap();
+        let loaded = UiPreferences::load(&path).unwrap();
+        assert_eq!(loaded.github.repository, "owner/repo");
+        assert_eq!(loaded.github.token_env, "GITHUB_TOKEN");
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("token ="));
+        assert!(!text.contains("body ="));
+    }
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},

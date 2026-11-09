@@ -18,6 +18,12 @@ pub use changes::{
 };
 pub use streaming::{stream_messages, StreamEnd, StreamEvent};
 mod git;
+mod github;
+pub use github::{
+    github_ledger_dir, github_post_records, post_github_write, GithubClient, GithubConfig,
+    GithubDocument, GithubError, GithubErrorKind, GithubItem, GithubKind, GithubPostRecord,
+    GithubReceipt, GithubRepository, GithubWrite, PreparedGithubWrite,
+};
 mod local;
 pub use git::{
     execute_git_operation, git_snapshot, prepare_git_operation, GitFile, GitOperation, GitRemote,

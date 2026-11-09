@@ -1,4 +1,5 @@
 use clap::Parser;
+mod github_cli;
 use codebot_core::{execute_backend, execute_messages, Backend, ChatMessage, Config};
 use std::{
     io::{self, BufRead, Read, Write},
@@ -11,6 +12,7 @@ use std::{
 };
 #[derive(Parser)]
 #[command(version, about = "OSS CodeBot: local diagnostics and AI APIs")]
+#[command(group(clap::ArgGroup::new("github_action").multiple(false)))]
 struct Args {
     /// Input text; reads stdin when omitted
     input: Option<String>,
@@ -55,6 +57,58 @@ struct Args {
     git_operation: Option<PathBuf>,
     #[arg(long, requires = "git_operation")]
     git_preview: bool,
+    #[arg(long, requires="github_action", conflicts_with_all=["input","config","interactive","stream","diagnose_local","list_models","test_api","run_command","git_status","git_operation","proposal","undo","attach","action","preview"])]
+    github_repository: Option<String>,
+    #[arg(
+        long,
+        requires = "github_repository",
+        default_value = "https://api.github.com"
+    )]
+    github_api_url: String,
+    #[arg(long, requires = "github_repository", default_value = "GH_TOKEN")]
+    github_token_env: String,
+    #[arg(
+        long,
+        requires = "github_repository",
+        group = "github_action",
+        conflicts_with = "yes"
+    )]
+    github_check: bool,
+    #[arg(
+        long,
+        requires = "github_repository",
+        group = "github_action",
+        conflicts_with = "yes"
+    )]
+    github_list: bool,
+    #[arg(
+        long,
+        requires = "github_repository",
+        group = "github_action",
+        conflicts_with = "yes"
+    )]
+    github_read: Option<u64>,
+    #[arg(
+        long,
+        requires = "github_repository",
+        group = "github_action",
+        conflicts_with = "yes"
+    )]
+    github_history: bool,
+    /// Prepare an issue-derived local branch, then confirm it through Git.
+    #[arg(long, requires_all=["github_repository","workspace"], group="github_action")]
+    github_branch: Option<u64>,
+    /// Preview and confirm a GithubWrite JSON file.
+    #[arg(long, requires = "github_repository", group = "github_action")]
+    github_write: Option<PathBuf>,
+    #[arg(long, requires="github_repository", value_parser=["issue","pull"], default_value="issue")]
+    github_kind: String,
+    #[arg(long, requires = "github_list", default_value_t = 1)]
+    github_page: u32,
+    #[arg(long, requires = "github_repository")]
+    github_ledger_dir: Option<PathBuf>,
+    #[arg(long, requires = "github_repository")]
+    github_preview: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -92,6 +146,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.github_repository.is_some() {
+        return github_cli::run(&args);
+    }
     if args.git_status || args.git_operation.is_some() {
         return git_cli(&args);
     }
