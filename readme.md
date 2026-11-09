@@ -48,11 +48,12 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - API・ローカルAIの回答を逐次表示、GUIの停止とCLIの`--stream`・Ctrl+C、途中回答の保持。[使い方](docs/STREAMING.md)
 - ローカル実行環境・モデル形式・CPU/GPUの診断、実行ファイルとモデルの選択、専用仮想環境への導入・復旧手順。[使い方](docs/LOCAL_DIAGNOSTICS.md)
 - APIのモデル一覧と確認付き接続診断、認証・権限・モデル・利用制限・応答形式のエラー分類。[使い方](docs/API_DIAGNOSTICS.md)
+- 確認付きコマンド実行、標準出力・標準エラーの逐次表示、タイムアウト・停止・子プロセス終了、結果の下書き追加。[使い方](docs/COMMANDS.md)
 - 標準エラーへの処理完了／エラーログ（入力内容は記録しません）
 
 OpenAI・Gemini・Claude・DeepSeek・Qwen・GLM・Grok・MiMo・KimiとカスタムAPIに対応しています。設定画面で処理方式・モデルID・APIキー・接続先を指定してください。APIキーは保存せず、環境変数からも取得できます。詳しくは [API設定](docs/API.md) を参照してください。
 
-GitHub連携、コマンド実行は未実装です。
+Git・GitHub連携は未実装です。
 ルールベースの案内は原因を確定するものではありません。
 
 ## 検証

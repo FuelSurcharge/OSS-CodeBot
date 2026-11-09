@@ -5,6 +5,11 @@ pub use api_diagnostics::{
     list_api_models, test_api_model, ApiDiagnosticError, ApiDiagnosticKind, ModelCatalog,
 };
 mod changes;
+mod commands;
+pub use commands::{
+    prepare_command, run_command, CommandEvent, CommandPreview, CommandReport, CommandSpec,
+    CommandState, PreparedCommand,
+};
 mod conversation;
 mod streaming;
 pub use changes::{

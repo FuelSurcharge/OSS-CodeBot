@@ -31,6 +31,22 @@ struct Args {
     /// Confirm and send a generation request; API charges may apply.
     #[arg(long, conflicts_with_all = ["list_models", "diagnose_local", "input", "interactive", "stream", "workspace", "proposal", "undo", "preview", "action"])]
     test_api: bool,
+    /// Preview and confirm an executable with literal argument values.
+    #[arg(long, requires="workspace", conflicts_with_all=["input","interactive","stream","diagnose_local","list_models","test_api","proposal","undo","preview","attach","action"])]
+    run_command: Option<String>,
+    /// One literal argument. Repeat; use --command-arg=-flag for flags.
+    #[arg(long, requires = "run_command", allow_hyphen_values = true)]
+    command_arg: Vec<String>,
+    /// Additional inherited variable name; values are never shown in the preview.
+    #[arg(long, requires = "run_command")]
+    pass_env: Vec<String>,
+    #[arg(long, requires = "run_command", default_value_t = 120)]
+    command_timeout: u64,
+    #[arg(long, requires = "run_command", default_value_t = 1024)]
+    output_limit_kib: usize,
+    /// Display execution details without starting the process.
+    #[arg(long, requires = "run_command")]
+    command_preview: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -68,6 +84,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.run_command.is_some() {
+        return command_cli(&args);
+    }
     if args.proposal.is_some() || args.undo.is_some() {
         return change_command(&args);
     }
@@ -179,6 +198,75 @@ fn run() -> Result<(), String> {
     }
     eprintln!("INFO request completed");
     Ok(())
+}
+
+fn command_cli(args: &Args) -> Result<(), String> {
+    let spec = codebot_core::CommandSpec {
+        program: args.run_command.clone().unwrap(),
+        args: args.command_arg.clone(),
+        cwd: args
+            .workspace
+            .clone()
+            .ok_or("--workspaceを指定してください")?,
+        pass_env: args.pass_env.clone(),
+        timeout_seconds: args.command_timeout,
+        max_output_bytes: args
+            .output_limit_kib
+            .checked_mul(1024)
+            .ok_or("出力上限が不正です")?,
+    };
+    let prepared = codebot_core::prepare_command(&spec)?;
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(prepared.preview()).map_err(|_| "実行内容を表示できません")?
+    );
+    if args.command_preview {
+        return Ok(());
+    }
+    if !args.yes {
+        eprintln!("表示した実行ファイル・引数・作業場所・環境変数名を確認してください。現在のユーザー権限で実行します。実行する場合は run と入力してください:");
+        let mut line = String::new();
+        Read::take(io::stdin().lock(), 32)
+            .read_line(&mut line)
+            .map_err(|_| "確認入力を読み込めません")?;
+        if line.trim() != "run" {
+            eprintln!("実行を中止しました");
+            return Ok(());
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
+        .map_err(|_| "Ctrl+Cの処理を準備できません")?;
+    let report = codebot_core::run_command(&prepared, &cancel, |event| {
+        let result = match event {
+            codebot_core::CommandEvent::Stdout(text) => {
+                let mut out = io::stdout().lock();
+                out.write_all(text.as_bytes()).and_then(|_| out.flush())
+            }
+            codebot_core::CommandEvent::Stderr(text) => {
+                let mut out = io::stderr().lock();
+                out.write_all(text.as_bytes()).and_then(|_| out.flush())
+            }
+        };
+        if result.is_err() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    });
+    eprintln!(
+        "\n{}",
+        serde_json::to_string(&report).map_err(|_| "実行結果を表示できません")?
+    );
+    if report.state == codebot_core::CommandState::Exited && report.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(report.error.unwrap_or_else(|| {
+            format!(
+                "コマンドが正常完了しませんでした（{:?}、終了コード {:?}）",
+                report.state, report.exit_code
+            )
+        }))
+    }
 }
 
 fn approve(yes: bool) -> Result<bool, String> {
