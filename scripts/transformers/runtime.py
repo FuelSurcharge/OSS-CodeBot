@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import queue
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -132,6 +133,55 @@ def plain_chat(messages):
     return "\n\n".join(f'{m["role"]}: {m["content"]}' for m in messages) + "\n\nassistant:"
 
 
+def generate_stream(model, tokenizer, torch, encoded, budget, write):
+    """One owned generation; disconnect signals stopping at the next token step.
+
+    Heartbeats detect a closed client even when the tokenizer buffers text.
+    The caller keeps the inference lock until this generation thread has exited.
+    """
+    from transformers import TextIteratorStreamer, StoppingCriteria, StoppingCriteriaList
+    stop = threading.Event()
+    errors = []
+
+    class Cancelled(StoppingCriteria):
+        def __call__(self, *_args, **_kwargs):
+            return stop.is_set()
+
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=0.2)
+
+    def generate():
+        try:
+            with torch.inference_mode():
+                model.generate(**encoded, max_new_tokens=budget, do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+                    streamer=streamer, stopping_criteria=StoppingCriteriaList([Cancelled()]))
+        except Exception as error:
+            errors.append(error_code(error))
+            streamer.end()
+
+    worker = threading.Thread(target=generate, daemon=True)
+    worker.start()
+    try:
+        while True:
+            try:
+                text = next(streamer)
+            except queue.Empty:
+                write(b": heartbeat\n\n")
+                continue
+            except StopIteration:
+                break
+            if text:
+                value = {"choices": [{"delta": {"content": text}, "finish_reason": None}]}
+                write(("data: " + json.dumps(value, ensure_ascii=False) + "\n\n").encode())
+        if errors:
+            write(b'data: {"error":"generation_failed"}\n\n')
+        else:
+            write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    finally:
+        stop.set()
+        worker.join()
+
+
 def serve(args):
     state = {"status": "loading", "code": None}
     model = tokenizer = torch = None
@@ -185,6 +235,7 @@ def serve(args):
                 return self.reply(401, {"error": "unauthorized"})
             if state["status"] != "ready":
                 return self.reply(503, state)
+            streaming = False
             try:
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 1024 * 1024:
@@ -205,12 +256,30 @@ def serve(args):
                     if encoded["input_ids"].shape[-1] + budget > args.ctx_size:
                         return self.reply(400, {"error": "context_limit"})
                     encoded = {k: v.to(model.device) for k, v in encoded.items()}
+                    if request.get("stream") is True:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        streaming = True
+                        self.close_connection = True
+
+                        def write(raw):
+                            self.wfile.write(raw)
+                            self.wfile.flush()
+
+                        generate_stream(model, tokenizer, torch, encoded, budget, write)
+                        return
                     tokens = model.generate(**encoded, max_new_tokens=budget, do_sample=False,
                         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id)
                     text = tokenizer.decode(tokens[0, encoded["input_ids"].shape[-1]:], skip_special_tokens=True)
                 self.reply(200, {"choices": [{"message": {"role": "assistant", "content": text}}]})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception as error:
-                self.reply(500, {"error": error_code(error)})
+                if not streaming:
+                    self.reply(500, {"error": error_code(error)})
 
         def log_message(self, *_):
             pass

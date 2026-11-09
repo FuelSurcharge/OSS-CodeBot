@@ -1,9 +1,13 @@
 use clap::Parser;
 use codebot_core::{execute_backend, execute_messages, Backend, ChatMessage, Config};
 use std::{
-    io::{self, BufRead, Read},
+    io::{self, BufRead, Read, Write},
     path::PathBuf,
     process::ExitCode,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 #[derive(Parser)]
 #[command(version, about = "OSS CodeBot: local diagnostics and AI APIs")]
@@ -15,6 +19,9 @@ struct Args {
     /// Interactive conversation; /clear clears history, /trim removes its oldest turn.
     #[arg(long, conflicts_with = "input")]
     interactive: bool,
+    /// Show text as it is generated. Ctrl+C cancels the current request.
+    #[arg(long, conflicts_with_all = ["proposal", "undo", "preview"])]
+    stream: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -59,8 +66,14 @@ fn run() -> Result<(), String> {
         return Err("--yesは変更の適用・取り消し時だけ指定できます".into());
     }
     let c = Config::load(args.config.as_deref())?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if args.stream {
+        let signal_cancel = cancel.clone();
+        ctrlc::set_handler(move || signal_cancel.store(true, Ordering::Relaxed))
+            .map_err(|_| "Ctrl+Cの処理を準備できません")?;
+    }
     if args.interactive {
-        return interactive(&c);
+        return interactive(&c, args.stream, &cancel);
     }
     let input = match args.input {
         Some(s) => s,
@@ -109,8 +122,14 @@ fn run() -> Result<(), String> {
         println!("{input}");
         return Ok(());
     }
-    let output = execute_backend(&c, backend, &c.api, None, &input)?;
-    println!("{output}");
+    if args.stream {
+        if stream_answer(&c, backend, &[ChatMessage::user(input)], &cancel)?.is_none() {
+            return Ok(());
+        }
+    } else {
+        let output = execute_backend(&c, backend, &c.api, None, &input)?;
+        println!("{output}");
+    }
     eprintln!("INFO request completed");
     Ok(())
 }
@@ -216,27 +235,91 @@ fn change_command(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn interactive(config: &Config) -> Result<(), String> {
+fn stream_answer(
+    config: &Config,
+    backend: Backend,
+    messages: &[ChatMessage],
+    cancel: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let mut answer = String::new();
+    let mut end = codebot_core::StreamEnd::Failed("処理が中断されました".into());
+    let mut stdout = io::stdout().lock();
+    let mut output_error = false;
+    codebot_core::stream_messages(
+        config,
+        backend,
+        &config.api,
+        None,
+        messages,
+        cancel,
+        |event| match event {
+            codebot_core::StreamEvent::Delta(text) => {
+                if stdout
+                    .write_all(text.as_bytes())
+                    .and_then(|_| stdout.flush())
+                    .is_err()
+                {
+                    output_error = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                answer.push_str(&text);
+            }
+            codebot_core::StreamEvent::Finished(status) => end = status,
+        },
+    );
+    let _ = writeln!(stdout);
+    if output_error {
+        return Err("標準出力へ書き込めません".into());
+    }
+    match end {
+        codebot_core::StreamEnd::Complete => Ok(Some(answer)),
+        codebot_core::StreamEnd::Cancelled => {
+            eprintln!("生成を停止しました。途中の回答は会話履歴へ送信しません。");
+            Ok(None)
+        }
+        codebot_core::StreamEnd::Failed(error) => Err(error),
+    }
+}
+fn interactive(config: &Config, streaming: bool, cancel: &AtomicBool) -> Result<(), String> {
     let backend = Backend::from_id(&config.provider).ok_or("対応していないプロバイダーです")?;
     eprintln!("対話モード: 各入力と会話履歴を選択した処理先へ送ります。/clear: 履歴消去、/trim: 最古の1往復を削除、/quit: 終了。文字数予算: {}（モデルのトークン上限とは別）", config.max_context_chars);
     let mut history = Vec::new();
-    let mut reader = io::stdin().lock();
+    // Keep stdin off the main thread so Ctrl+C also exits an idle streaming CLI.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let limit = config.max_input_chars as u64 * 4 + 2;
+    std::thread::spawn(move || {
+        let mut reader = io::stdin().lock();
+        loop {
+            let mut line = String::new();
+            let result = Read::take(&mut reader, limit).read_line(&mut line);
+            let done = matches!(result, Ok(0) | Err(_));
+            let line = match result {
+                Ok(0) => Ok(None),
+                Ok(count) if count as u64 == limit && !line.ends_with('\n') => {
+                    let _ = reader.skip_until(b'\n');
+                    Err("入力が文字数の上限を超えています".to_owned())
+                }
+                Ok(_) => Ok(Some(line)),
+                Err(_) => Err("対話入力を読み込めません".to_owned()),
+            };
+            if tx.send(line).is_err() || done {
+                break;
+            }
+        }
+    });
     loop {
-        let mut line = String::new();
-        let limit = config.max_input_chars as u64 * 4 + 2;
-        let count = Read::take(&mut reader, limit)
-            .read_line(&mut line)
-            .map_err(|_| "対話入力を読み込めません")?;
-        if count == 0 {
+        if cancel.load(Ordering::Relaxed) {
             break;
         }
-        if count as u64 == limit && !line.ends_with('\n') {
-            reader
-                .skip_until(b'\n')
-                .map_err(|_| "対話入力を読み込めません")?;
-            eprintln!("ERROR 入力が文字数の上限を超えています");
-            continue;
-        }
+        let line = match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(Ok(Some(line))) => line,
+            Ok(Err(error)) => {
+                eprintln!("ERROR {error}");
+                continue;
+            }
+            Ok(Ok(None)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        };
         let input = line.trim();
         match input {
             "/quit" | "/exit" => break,
@@ -257,9 +340,16 @@ fn interactive(config: &Config) -> Result<(), String> {
         }
         let mut messages = history.clone();
         messages.push(ChatMessage::user(input));
-        match execute_messages(config, backend, &config.api, None, &messages) {
-            Ok(answer) => {
-                println!("{answer}");
+        let answer = if streaming {
+            stream_answer(config, backend, &messages, cancel)
+        } else {
+            execute_messages(config, backend, &config.api, None, &messages).map(Some)
+        };
+        match answer {
+            Ok(Some(answer)) => {
+                if !streaming {
+                    println!("{answer}");
+                }
                 messages.push(ChatMessage::assistant(answer));
                 if backend != Backend::Rules {
                     history = messages;
@@ -267,7 +357,9 @@ fn interactive(config: &Config) -> Result<(), String> {
                 eprintln!("INFO request completed");
             }
             Err(error) => eprintln!("ERROR {error}"),
+            Ok(None) => {}
         }
+        cancel.store(false, Ordering::Relaxed);
     }
     Ok(())
 }

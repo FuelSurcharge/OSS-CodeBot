@@ -229,7 +229,7 @@ impl ApiConfig {
 
 pub struct ApiProvider {
     backend: Backend,
-    config: ApiConfig,
+    pub(crate) config: ApiConfig,
     key: String,
 }
 impl std::fmt::Debug for ApiProvider {
@@ -273,7 +273,7 @@ impl ApiProvider {
     fn request(&self, input: &str) -> Result<(Url, HeaderMap, Value), String> {
         self.request_messages(&[ChatMessage::user(input)])
     }
-    fn request_messages(
+    pub(crate) fn request_messages(
         &self,
         messages: &[ChatMessage],
     ) -> Result<(Url, HeaderMap, Value), String> {
@@ -391,7 +391,7 @@ impl ApiProvider {
         extract_text(self.config.protocol, &value)
     }
 }
-fn extract_text(protocol: ApiProtocol, value: &Value) -> Result<String, String> {
+pub(crate) fn extract_text(protocol: ApiProtocol, value: &Value) -> Result<String, String> {
     let text = match protocol {
         ApiProtocol::Openai => value
             .pointer("/choices/0/message/content")

@@ -2,10 +2,12 @@ use serde::Deserialize;
 mod api;
 mod changes;
 mod conversation;
+mod streaming;
 pub use changes::{
     apply_changes, new_change_journal_path, prepare_changes, preview_undo, undo_changes,
     ChangePreview, ChangeProposal, FileChange, LineEdit, PreparedChanges,
 };
+pub use streaming::{stream_messages, StreamEnd, StreamEvent};
 mod local;
 mod transformers;
 mod workspace;

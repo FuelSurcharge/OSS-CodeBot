@@ -5,3 +5,4 @@ edition.workspace = true
 [dependencies]
 codebot-core.workspace = true
 clap = { version = "4", features = ["derive"] }
+ctrlc = "3"

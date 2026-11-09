@@ -1,11 +1,15 @@
 use codebot_core::{
-    execute_messages, validate_messages, ApiConfig, ApiProtocol, Backend, ChatMessage, Config,
+    stream_messages, validate_messages, ApiConfig, ApiProtocol, Backend, ChatMessage, Config,
+    StreamEnd, StreamEvent,
 };
 use eframe::egui::{self, Color32, RichText};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
 };
 mod change_panel;
 mod chat_storage;
@@ -48,6 +52,9 @@ struct Session {
     retry_input: Option<String>,
     #[serde(skip)]
     notice: Option<String>,
+    #[serde(skip)]
+    stream_index: Option<usize>,
+    generation_incomplete: bool,
 }
 impl Session {
     fn request_messages(
@@ -126,7 +133,9 @@ struct App {
     sidebar: bool,
     copied: Option<(usize, usize)>,
     markdown_cache: egui_commonmark::CommonMarkCache,
-    pending: Option<(usize, mpsc::Receiver<Result<String, String>>)>,
+    pending: Option<(usize, mpsc::Receiver<StreamEvent>)>,
+    request_cancel: Option<Arc<AtomicBool>>,
+    archive_last_saved: std::time::Instant,
     save_chats: bool,
     sessions_dirty: bool,
     archive_blocked: bool,
@@ -142,6 +151,13 @@ struct App {
     files_open: bool,
     change_panel: change_panel::ChangePanel,
     changes_open: bool,
+}
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stop_generation();
+        self.pending = None;
+        self.flush_chats();
+    }
 }
 impl Default for App {
     fn default() -> Self {
@@ -161,6 +177,8 @@ impl Default for App {
             copied: None,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             pending: None,
+            request_cancel: None,
+            archive_last_saved: std::time::Instant::now(),
             save_chats: false,
             sessions_dirty: false,
             archive_blocked: false,
@@ -196,6 +214,15 @@ impl App {
             .and_then(|path| chat_storage::load(&path));
         match result {
             Ok(Some(mut archive)) => {
+                for session in &mut archive.sessions {
+                    if session.generation_incomplete {
+                        if session.messages.last().is_none_or(|(user, _)| *user) {
+                            session.messages.push((false, String::new()));
+                        }
+                        session.messages.last_mut().unwrap().1.push_str("\n\n---\n生成中にアプリが終了しました。途中の回答は会話履歴へ送信しません。");
+                        session.generation_incomplete = false;
+                    }
+                }
                 if merge
                     && self.sessions.iter().any(|s| {
                         !s.messages.is_empty() || !s.draft.is_empty() || !s.label.is_empty()
@@ -247,6 +274,12 @@ impl App {
         if !self.save_chats || !self.sessions_dirty || self.archive_blocked {
             return;
         }
+        if self.pending.is_some()
+            && self.archive_last_saved.elapsed() < std::time::Duration::from_millis(500)
+        {
+            return;
+        }
+        self.archive_last_saved = std::time::Instant::now();
         self.sessions_dirty = false;
         self.storage_error = self
             .archive_path()
@@ -537,51 +570,110 @@ impl App {
             .cloned()
             .unwrap_or_else(|| backend.defaults());
         let api_key = self.api_key.clone();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.request_cancel = Some(cancel.clone());
+        self.sessions[self.active].stream_index = None;
+        self.sessions[self.active].generation_incomplete = true;
         self.pending = Some((self.active, rx));
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = if let Some(connection) = local_connection {
-                connection.respond_messages(&config, &messages)
-            } else {
-                execute_messages(&config, backend, &api, Some(&api_key), &messages)
+            let emit = |event| {
+                if tx.send(event).is_err() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                ctx.request_repaint();
             };
-            let _ = tx.send(result);
-            ctx.request_repaint();
+            if let Some(connection) = local_connection {
+                connection.stream_messages(&config, &messages, &cancel, emit);
+            } else {
+                stream_messages(
+                    &config,
+                    backend,
+                    &api,
+                    Some(&api_key),
+                    &messages,
+                    &cancel,
+                    emit,
+                );
+            }
         });
     }
+    fn stop_generation(&mut self) {
+        if let Some(cancel) = &self.request_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
     fn poll(&mut self) {
-        let result = self
-            .pending
-            .as_ref()
-            .and_then(|(id, rx)| match rx.try_recv() {
-                Ok(r) => Some((*id, r)),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some((*id, Err("処理が中断されました".into())))
-                }
-                Err(mpsc::TryRecvError::Empty) => None,
-            });
-        if let Some((id, result)) = result {
-            let message = match result {
-                Ok(s) => {
-                    self.sessions[id].retry_input = None;
-                    if let Some(input) = self.sessions[id].in_flight_input.take() {
-                        self.sessions[id]
-                            .history
-                            .extend([ChatMessage::user(input), ChatMessage::assistant(s.clone())]);
-                    }
-                    eprintln!("INFO request completed");
-                    s
-                }
-                Err(e) => {
-                    self.sessions[id].retry_input = self.sessions[id].in_flight_input.clone();
-                    self.sessions[id].in_flight_input = None;
-                    eprintln!("ERROR request failed");
-                    format!("{e}\n設定と入力を確認して、もう一度送信してください。")
-                }
+        for _ in 0..256 {
+            let Some((id, event)) =
+                self.pending
+                    .as_ref()
+                    .and_then(|(id, rx)| match rx.try_recv() {
+                        Ok(event) => Some((*id, event)),
+                        Err(mpsc::TryRecvError::Disconnected) => Some((
+                            *id,
+                            StreamEvent::Finished(StreamEnd::Failed("処理が中断されました".into())),
+                        )),
+                        Err(mpsc::TryRecvError::Empty) => None,
+                    })
+            else {
+                break;
             };
-            self.sessions[id].messages.push((false, message));
-            self.pending = None;
+            let stopped = self
+                .request_cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed));
+            let session = &mut self.sessions[id];
+            match event {
+                StreamEvent::Delta(text) if !stopped => {
+                    let index = *session.stream_index.get_or_insert_with(|| {
+                        session.messages.push((false, String::new()));
+                        session.messages.len() - 1
+                    });
+                    session.messages[index].1.push_str(&text);
+                }
+                StreamEvent::Delta(_) => continue,
+                StreamEvent::Finished(end) => {
+                    session.generation_incomplete = false;
+                    let end = if stopped { StreamEnd::Cancelled } else { end };
+                    let index = session.stream_index.take().unwrap_or_else(|| {
+                        session.messages.push((false, String::new()));
+                        session.messages.len() - 1
+                    });
+                    match end {
+                        StreamEnd::Complete => {
+                            session.retry_input = None;
+                            if let Some(input) = session.in_flight_input.take() {
+                                session.history.extend([
+                                    ChatMessage::user(input),
+                                    ChatMessage::assistant(session.messages[index].1.clone()),
+                                ]);
+                            }
+                            eprintln!("INFO request completed");
+                        }
+                        status => {
+                            session.retry_input = session.in_flight_input.take();
+                            let notice = match status {
+                                StreamEnd::Cancelled => {
+                                    "生成を停止しました。途中の回答は会話履歴へ送信しません。"
+                                        .into()
+                                }
+                                StreamEnd::Failed(error) => format!(
+                                    "{error}\n設定と入力を確認して、もう一度送信してください。"
+                                ),
+                                _ => unreachable!(),
+                            };
+                            session.messages[index]
+                                .1
+                                .push_str(&format!("\n\n---\n{notice}"));
+                            eprintln!("INFO request ended without a complete answer");
+                        }
+                    }
+                    self.pending = None;
+                    self.request_cancel = None;
+                }
+            }
             self.sessions_dirty = true;
         }
     }
@@ -671,7 +763,11 @@ impl App {
                                 });
                         },
                     );
-                    if icon_button(ui, Icon::Send, "送信", enabled, true).clicked() {
+                    if self.pending.is_some() {
+                        if icon_button(ui, Icon::Stop, "生成を停止", true, true).clicked() {
+                            self.stop_generation();
+                        }
+                    } else if icon_button(ui, Icon::Send, "送信", enabled, true).clicked() {
                         self.send(ui.ctx());
                     }
                 });
@@ -679,7 +775,16 @@ impl App {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             let notice = if self.pending.is_some() {
-                "応答を待っています…".to_string()
+                if self
+                    .request_cancel
+                    .as_ref()
+                    .is_some_and(|c| c.load(Ordering::Relaxed))
+                {
+                    "生成を停止しています…"
+                } else {
+                    "生成中…"
+                }
+                .to_string()
             } else if self.backend == Backend::Rules {
                 "ローカル診断。入力内容は外部に送信されません。".into()
             } else if self.backend == Backend::Local {
@@ -841,7 +946,7 @@ impl App {
                     .is_some_and(|(id, _)| *id == self.active)
                 {
                     ui.add_space(20.0);
-                    ui.label(RichText::new("ログを確認しています…").color(MUTED));
+                    ui.label(RichText::new("生成中…").color(MUTED));
                 }
             });
         if let Some(uri) = reference {
@@ -1358,6 +1463,7 @@ impl eframe::App for App {
 #[derive(Clone, Copy)]
 enum Icon {
     Send,
+    Stop,
     Copy,
     New,
     Panel,
@@ -1429,6 +1535,13 @@ fn icon_button(
         );
     };
     match icon {
+        Icon::Stop => {
+            p.rect_filled(
+                egui::Rect::from_center_size(c, egui::vec2(11.0, 11.0)),
+                2.0,
+                color,
+            );
+        }
         Icon::Send => {
             line([0.0, 7.0], [0.0, -7.0]);
             line([-5.0, -2.0], [0.0, -7.0]);
@@ -1538,6 +1651,55 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     #[test]
+    fn restoring_an_interrupted_generation_marks_partial_text_and_keeps_it_out_of_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.preferences_path = Some(dir.path().join("gui-preferences.toml"));
+        app.save_chats = true;
+        app.sessions[0].generation_incomplete = true;
+        app.sessions[0].messages = vec![(true, "question".into()), (false, "partial".into())];
+        app.sessions_dirty = true;
+        app.flush_chats();
+        app.restore_chats(false);
+        assert!(!app.sessions[0].generation_incomplete);
+        assert!(app.sessions[0].messages[1]
+            .1
+            .contains("生成中にアプリが終了"));
+        assert!(app.sessions[0].history.is_empty());
+        assert!(!app.sessions[0].history_enabled);
+    }
+    #[test]
+    fn stopping_keeps_partial_text_ignores_late_deltas_and_unblocks_the_next_request() {
+        let mut app = App::default();
+        app.sessions[0].in_flight_input = Some("request".into());
+        let (tx, rx) = mpsc::channel();
+        app.pending = Some((0, rx));
+        app.request_cancel = Some(Arc::new(AtomicBool::new(false)));
+        tx.send(StreamEvent::Delta("途中の回答".into())).unwrap();
+        app.poll();
+        app.new_chat();
+        app.sessions[1].draft = "別の下書き".into();
+        app.stop_generation();
+        tx.send(StreamEvent::Delta("遅延イベント".into())).unwrap();
+        tx.send(StreamEvent::Finished(StreamEnd::Complete)).unwrap();
+        app.poll();
+        assert!(app.pending.is_none());
+        assert!(app.sessions[0].history.is_empty());
+        assert!(app.sessions[0].messages[0].1.contains("途中の回答"));
+        assert!(app.sessions[0].messages[0].1.contains("生成を停止"));
+        assert!(!app.sessions[0].messages[0].1.contains("遅延イベント"));
+        assert_eq!(app.sessions[1].draft, "別の下書き");
+        app.sessions[1].in_flight_input = Some("next request".into());
+        let (next_tx, rx) = mpsc::channel();
+        app.pending = Some((1, rx));
+        next_tx.send(StreamEvent::Delta("次の回答".into())).unwrap();
+        next_tx
+            .send(StreamEvent::Finished(StreamEnd::Complete))
+            .unwrap();
+        app.poll();
+        assert_eq!(app.sessions[1].history.len(), 2);
+    }
+    #[test]
     fn archive_reload_preserves_corrupt_files_and_does_not_duplicate_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::default();
@@ -1620,13 +1782,15 @@ mod tests {
         app.sessions[0].in_flight_input = Some("failed request".into());
         let (tx, rx) = mpsc::channel();
         app.pending = Some((0, rx));
-        tx.send(Err("HTTP 503".into())).unwrap();
+        tx.send(StreamEvent::Finished(StreamEnd::Failed("HTTP 503".into())))
+            .unwrap();
         app.poll();
         assert!(app.sessions[0].history.is_empty());
         app.sessions[0].in_flight_input = Some("good request".into());
         let (tx, rx) = mpsc::channel();
         app.pending = Some((0, rx));
-        tx.send(Ok("answer".into())).unwrap();
+        tx.send(StreamEvent::Delta("answer".into())).unwrap();
+        tx.send(StreamEvent::Finished(StreamEnd::Complete)).unwrap();
         app.new_chat();
         app.poll();
         assert_eq!(
@@ -1664,7 +1828,9 @@ mod tests {
         app.pending = Some((0, rx));
         app.new_chat();
         app.sessions[1].draft = "second request draft".into();
-        tx.send(Ok("first response".into())).unwrap();
+        tx.send(StreamEvent::Delta("first response".into()))
+            .unwrap();
+        tx.send(StreamEvent::Finished(StreamEnd::Complete)).unwrap();
 
         app.poll();
 

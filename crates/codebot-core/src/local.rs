@@ -445,6 +445,26 @@ impl std::fmt::Debug for LocalConnection {
     }
 }
 impl LocalConnection {
+    pub(crate) fn api_provider(&self) -> Result<ApiProvider, String> {
+        ApiProvider::new(Backend::Custom, &self.api, Some(&self.key))
+    }
+    pub fn stream_messages(
+        &self,
+        config: &Config,
+        messages: &[crate::ChatMessage],
+        cancel: &AtomicBool,
+        emit: impl FnMut(crate::StreamEvent),
+    ) {
+        crate::stream_messages(
+            config,
+            Backend::Custom,
+            &self.api,
+            Some(&self.key),
+            messages,
+            cancel,
+            emit,
+        );
+    }
     pub fn respond(&self, config: &Config, input: &str) -> Result<String, String> {
         self.respond_messages(config, &[crate::ChatMessage::user(input.trim())])
     }
@@ -763,6 +783,10 @@ class Handler(BaseHTTPRequestHandler):
   if len(body['messages'])>1:
    assert [m['role'] for m in body['messages']]==['user','assistant','user']
    assert body['messages'][0]['content']=='previous question'
+  if body.get('stream'):
+   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+   self.wfile.write(b'data: {"choices":[{"delta":{"content":"mock local stream"}}]}\n\ndata: [DONE]\n\n');self.wfile.flush()
+   return
   data=json.dumps({'choices':[{'message':{'content':'mock local inference'}}]}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
  def log_message(self,*args):pass
@@ -794,6 +818,20 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
                 )
                 .unwrap(),
             "mock local inference"
+        );
+        let mut events = Vec::new();
+        connection.stream_messages(
+            &Config::default(),
+            &[crate::ChatMessage::user("stream")],
+            &AtomicBool::new(false),
+            |event| events.push(event),
+        );
+        assert_eq!(
+            events,
+            vec![
+                crate::StreamEvent::Delta("mock local stream".into()),
+                crate::StreamEvent::Finished(crate::StreamEnd::Complete)
+            ]
         );
         let base = connection.api.base_url.clone();
         drop(server);
