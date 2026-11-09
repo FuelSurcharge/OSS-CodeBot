@@ -11,6 +11,7 @@ enum Event {
 #[derive(Default)]
 pub struct ChangePanel {
     root: String,
+    root_locked: bool,
     text: String,
     proposal: Option<ChangeProposal>,
     selected: Vec<Vec<bool>>,
@@ -24,8 +25,23 @@ pub struct ChangePanel {
     operation_root: Option<String>,
     last_location: Option<(String, String)>,
     settings_changed: bool,
+    tool_result: Option<codebot_core::ToolResult>,
 }
 impl ChangePanel {
+    pub fn remember_location(&mut self, root: String, journal: String) {
+        self.reset_preview();
+        self.last_location = if root.is_empty() || journal.is_empty() {
+            None
+        } else {
+            Some((root, journal))
+        };
+    }
+    pub fn lock_root(&mut self) {
+        self.root_locked = true;
+    }
+    pub fn tool_result(&self) -> Option<codebot_core::ToolResult> {
+        self.tool_result.clone()
+    }
     pub fn last_location(&self) -> Option<(String, String)> {
         self.last_location.clone()
     }
@@ -47,7 +63,9 @@ impl ChangePanel {
             return Err("ファイル操作を処理中です。完了してから変更案を開いてください".into());
         }
         let proposal = ChangeProposal::parse(text)?;
+        self.tool_result = None;
         self.text = text.to_owned();
+        self.root_locked = false;
         self.root = root.unwrap_or("").to_owned();
         self.selected = proposal
             .changes
@@ -128,6 +146,7 @@ impl ChangePanel {
                 self.previews = previews;
             }
             Ok(Event::Applied(count)) => {
+                self.tool_result=Some(codebot_core::ToolResult {status:codebot_core::ToolStatus::Succeeded,summary:format!("利用者が確認・選択した変更案を{count}ファイルへ適用しました。変更記録から取り消し可能です。")});
                 self.message = Some(format!(
                     "{count}ファイルへ適用しました。変更記録から取り消し可能です。"
                 ));
@@ -137,7 +156,15 @@ impl ChangePanel {
                 self.settings_changed = true;
                 self.message = Some(format!("{count}ファイルの変更を取り消しました。"));
             }
-            Err(error) => self.message = Some(error),
+            Err(error) => {
+                if self.operation_root.is_some() {
+                    self.tool_result = Some(codebot_core::ToolResult {
+                        status: codebot_core::ToolStatus::Failed,
+                        summary: error.clone(),
+                    });
+                }
+                self.message = Some(error)
+            }
         }
         self.operation_root.take()
     }
@@ -147,7 +174,11 @@ impl ChangePanel {
         ui.add_enabled_ui(!busy, |ui| {
             ui.label("作業フォルダのフルパス");
             if ui
-                .add(egui::TextEdit::singleline(&mut self.root).desired_width(f32::INFINITY))
+                .add(
+                    egui::TextEdit::singleline(&mut self.root)
+                        .interactive(!self.root_locked)
+                        .desired_width(f32::INFINITY),
+                )
                 .changed()
             {
                 self.reset_preview();
@@ -323,6 +354,30 @@ impl ChangePanel {
         if let Some(message) = &self.message {
             ui.label(message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn another_tools_recovery_record_preserves_the_open_proposal_and_invalidates_its_approval() {
+        let mut panel = ChangePanel::default();
+        panel.root = "original-workspace".into();
+        panel.text = "original proposal".into();
+        panel.journal = "original-recovery.json".into();
+        panel.confirmed = true;
+        panel.remember_location("tool-workspace".into(), "tool-recovery.json".into());
+        assert_eq!(panel.root, "original-workspace");
+        assert_eq!(panel.text, "original proposal");
+        assert_eq!(panel.journal, "original-recovery.json");
+        assert!(!panel.confirmed);
+        assert_eq!(
+            panel.last_location(),
+            Some(("tool-workspace".into(), "tool-recovery.json".into()))
+        );
+        panel.remember_location(String::new(), String::new());
+        assert!(panel.last_location().is_none());
     }
 }
 

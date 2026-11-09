@@ -1,5 +1,9 @@
 use serde::Deserialize;
+mod ai_tools;
 mod api;
+pub use ai_tools::{
+    AgentEvent, AgentReply, ToolAction, ToolCall, ToolConversation, ToolResult, ToolStatus,
+};
 mod api_diagnostics;
 pub use api_diagnostics::{
     list_api_models, test_api_model, ApiDiagnosticError, ApiDiagnosticKind, ModelCatalog,

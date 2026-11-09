@@ -134,6 +134,7 @@ impl Backend {
 pub enum ApiProtocol {
     #[default]
     Openai,
+    Responses,
     Gemini,
     Claude,
 }
@@ -141,6 +142,7 @@ impl ApiProtocol {
     pub fn label(self) -> &'static str {
         match self {
             Self::Openai => "OpenAI互換",
+            Self::Responses => "OpenAI Responses",
             Self::Gemini => "Gemini",
             Self::Claude => "Claude Messages",
         }
@@ -181,7 +183,11 @@ impl ApiConfig {
             c.api_key_env = defaults.api_key_env;
         }
         if backend != Backend::Custom {
-            c.protocol = defaults.protocol;
+            c.protocol = if backend == Backend::Openai && self.protocol == ApiProtocol::Responses {
+                ApiProtocol::Responses
+            } else {
+                defaults.protocol
+            };
             c.anonymous = false;
         }
         c
@@ -289,6 +295,9 @@ impl ApiProvider {
                 ApiProtocol::Openai => {
                     path.push("chat").push("completions");
                 }
+                ApiProtocol::Responses => {
+                    path.push("responses");
+                }
                 ApiProtocol::Claude => {
                     path.push("messages");
                 }
@@ -328,6 +337,9 @@ impl ApiProvider {
                 };
                 body[name] = json!(self.config.max_output_tokens);
                 body
+            }
+            ApiProtocol::Responses => {
+                json!({"model":model,"input":messages,"max_output_tokens":self.config.max_output_tokens,"store":false,"stream":false})
             }
             ApiProtocol::Claude => {
                 json!({"model":model,"max_tokens":self.config.max_output_tokens,"messages":messages,"stream":false})
@@ -395,7 +407,26 @@ impl ApiProvider {
     }
 }
 pub(crate) fn extract_text(protocol: ApiProtocol, value: &Value) -> Result<String, String> {
+    if protocol == ApiProtocol::Responses && value["status"] != "completed" {
+        return Err(
+            "Responses APIの生成が完了しませんでした。出力上限・モデル・接続先を確認してください"
+                .into(),
+        );
+    }
     let text = match protocol {
+        ApiProtocol::Responses => value["output"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["type"] == "message")
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter_map(|part| match part["type"].as_str() {
+                Some("output_text") => part["text"].as_str(),
+                Some("refusal") => part["refusal"].as_str(),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         ApiProtocol::Openai => value
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
@@ -661,6 +692,12 @@ mod tests {
     fn actual_http_roundtrips_cover_three_protocols_and_mimo_header() {
         for (backend, protocol, reply, header) in [
             (
+                Backend::Openai,
+                ApiProtocol::Responses,
+                r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"mock answer"}]}]}"#,
+                "authorization: Bearer mock-secret-key",
+            ),
+            (
                 Backend::Custom,
                 ApiProtocol::Openai,
                 r#"{"choices":[{"message":{"content":"mock answer"}}]}"#,
@@ -702,6 +739,11 @@ mod tests {
         ];
         for (backend, protocol, reply) in [
             (
+                Backend::Openai,
+                ApiProtocol::Responses,
+                r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"太郎"}]}]}"#,
+            ),
+            (
                 Backend::Custom,
                 ApiProtocol::Openai,
                 r#"{"choices":[{"message":{"content":"太郎"}}]}"#,
@@ -725,6 +767,12 @@ mod tests {
             if protocol == ApiProtocol::Gemini {
                 assert_eq!(body["contents"][1]["role"], "model");
                 assert_eq!(body["contents"][0]["parts"][0]["text"], "私の名前は太郎");
+            } else if protocol == ApiProtocol::Responses {
+                assert!(request.starts_with("POST /v1/responses "));
+                assert_eq!(body["input"][1]["role"], "assistant");
+                assert_eq!(body["input"][0]["content"], "私の名前は太郎");
+                assert_eq!(body["store"], false);
+                assert_eq!(body["max_output_tokens"], 2048);
             } else {
                 assert_eq!(body["messages"][1]["role"], "assistant");
                 assert_eq!(body["messages"].as_array().unwrap().len(), 3);

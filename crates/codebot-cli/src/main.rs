@@ -1,6 +1,7 @@
 use clap::Parser;
 mod cache_cli;
 mod github_cli;
+mod tools_cli;
 use codebot_core::{execute_backend, execute_messages, Backend, ChatMessage, Config};
 use std::{
     io::{self, BufRead, Read, Write},
@@ -16,6 +17,11 @@ use std::{
 #[command(group(clap::ArgGroup::new("github_action").multiple(false)))]
 #[command(group(clap::ArgGroup::new("cache_action").multiple(false)))]
 struct Args {
+    /// Ask an API for reviewed change/command proposals; confirm every action and result send.
+    #[arg(long,requires_all=["input","workspace"],conflicts_with_all=["interactive","stream","diagnose_local","list_models","test_api","run_command","git_status","git_operation","github_repository","proposal","undo","attach","action","preview","cache_action","yes"])]
+    tools: bool,
+    #[arg(long, requires = "tools")]
+    tools_journal_dir: Option<PathBuf>,
     #[command(flatten)]
     cache: cache_cli::Args,
     /// Input text; reads stdin when omitted
@@ -150,6 +156,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.tools {
+        return tools_cli::run(&args);
+    }
     if args.cache.cache_list || args.cache.cache_delete.is_some() {
         return cache_cli::run(&args.cache, args.yes);
     }

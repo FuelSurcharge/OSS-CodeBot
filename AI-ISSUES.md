@@ -3,7 +3,7 @@
 最終更新: 2026-11-09（日本時間）
 
 開発タスクはこのファイルと `docs/tasks/` のMarkdownで管理する。
-全20件中、完了12件・残り8件（アプリ6件、将来構想2件）。
+全20件中、完了13件・残り7件（アプリ5件、将来構想2件）。
 各リンク先に現状・完了条件・依存関係・検証結果を記載する。
 `CB-003`などはファイル管理用のIDで、GitHubのIssue番号とは異なる。
 
@@ -19,7 +19,6 @@
 
 ## P2：基本機能の後に進める候補
 
-- [ ] [CB-015：Responses API・共通ツール呼び出し](docs/tasks/CB-015.md)
 - [ ] [CB-018：権限を明示するプラグイン拡張](docs/tasks/CB-018.md)
 
 ## 将来構想：別プロジェクト
@@ -29,6 +28,7 @@
 
 ## 完了
 
+- [x] [CB-015：Responses API・共通ツール呼び出し](docs/tasks/CB-015.md) — 2026-11-09。実装・4形式の模擬APIとLinux実GUI/CLI検証完了。各社実APIのモデル互換性は未検証。
 - [x] [CB-007：モデル取得再開・分割GGUF・キャッシュ管理](docs/tasks/CB-007.md) — 2026-11-09。実装・模擬HTTPとLinux実GUI/CLI検証完了。Hugging Face実通信・学習済み分割GGUF推論は未検証。
 - [x] [CB-013：アプリからGitHub Issue・Pull Requestを扱う](docs/tasks/CB-013.md) — 2026-11-09。実装・模擬APIとLinux実GUI検証完了。本番GitHub認証・投稿は未検証。
 - [x] [CB-012：Gitの状態・差分・ブランチ・コミット](docs/tasks/CB-012.md) — 2026-11-09。実装・Linux実Git/GUI検証完了。ローカルbareへのpush確認、GitHub認証と他OS実機は未検証。

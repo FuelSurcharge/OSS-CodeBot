@@ -30,6 +30,7 @@ impl Drop for Task {
 }
 pub struct CommandPanel {
     root: String,
+    root_locked: bool,
     program: String,
     args: Vec<String>,
     environment: String,
@@ -48,6 +49,7 @@ impl Default for CommandPanel {
     fn default() -> Self {
         Self {
             root: String::new(),
+            root_locked: false,
             program: String::new(),
             args: vec![],
             environment: String::new(),
@@ -65,6 +67,65 @@ impl Default for CommandPanel {
     }
 }
 impl CommandPanel {
+    pub fn prepare_tool(&mut self, ctx: &egui::Context, spec: &CommandSpec) -> Result<(), String> {
+        if self.is_busy() {
+            return Err("コマンドを処理中です".into());
+        }
+        *self = Self {
+            root: spec.cwd.to_string_lossy().into_owned(),
+            root_locked: true,
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            timeout: spec.timeout_seconds,
+            output_kib: spec.max_output_bytes / 1024,
+            ..Default::default()
+        };
+        self.preview(ctx);
+        Ok(())
+    }
+    pub fn tool_result(&self) -> Option<codebot_core::ToolResult> {
+        let report = self.report.as_ref()?;
+        let summary = format!(
+            "状態：{} / 終了コード：{}\n{}標準出力：\n{}\n標準エラー：\n{}",
+            match report.state {
+                codebot_core::CommandState::Exited => "終了",
+                codebot_core::CommandState::Cancelled => "停止",
+                codebot_core::CommandState::TimedOut => "タイムアウト",
+                codebot_core::CommandState::OutputLimit => "出力上限",
+                codebot_core::CommandState::Failed => "実行エラー",
+            },
+            report
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "取得なし".into()),
+            report
+                .error
+                .as_ref()
+                .map(|e| format!("エラー：{e}\n"))
+                .unwrap_or_default(),
+            self.stdout,
+            self.stderr
+        );
+        Some(codebot_core::ToolResult {
+            status: if report.state == codebot_core::CommandState::Cancelled {
+                codebot_core::ToolStatus::Cancelled
+            } else if report.state == codebot_core::CommandState::Exited
+                && report.exit_code == Some(0)
+            {
+                codebot_core::ToolStatus::Succeeded
+            } else {
+                codebot_core::ToolStatus::Failed
+            },
+            summary: if summary.chars().count() > 12000 {
+                format!(
+                    "{}\n（以降を省略）",
+                    summary.chars().take(11980).collect::<String>()
+                )
+            } else {
+                summary
+            },
+        })
+    }
     pub fn is_busy(&self) -> bool {
         self.task.is_some()
     }
@@ -195,7 +256,11 @@ impl CommandPanel {
         ui.add_enabled_ui(!busy, |ui| {
             ui.label("作業フォルダのフルパス");
             changed |= ui
-                .add(egui::TextEdit::singleline(&mut self.root).desired_width(f32::INFINITY))
+                .add(
+                    egui::TextEdit::singleline(&mut self.root)
+                        .interactive(!self.root_locked)
+                        .desired_width(f32::INFINITY),
+                )
                 .changed();
             ui.label("実行ファイル（フルパスまたはPATHの名前）");
             changed |= ui

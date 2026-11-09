@@ -158,6 +158,16 @@ impl ApiProvider {
                     emit(StreamEvent::Delta(text));
                 }
                 if done {
+                    if !displayed && self.config.protocol == ApiProtocol::Responses {
+                        let value: Value = serde_json::from_str(&data)
+                            .map_err(|_| "Responsesの終端イベントが不正です")?;
+                        if let Ok(text) =
+                            crate::api::extract_text(ApiProtocol::Responses, &value["response"])
+                        {
+                            emit(StreamEvent::Delta(text));
+                            displayed = true;
+                        }
+                    }
                     return if displayed {
                         Ok(())
                     } else {
@@ -228,6 +238,21 @@ fn delta(protocol: ApiProtocol, data: &str) -> Result<(String, bool), String> {
         return Err("APIが生成中のエラーを返しました。途中の回答を保持しています".into());
     }
     Ok(match protocol {
+        ApiProtocol::Responses => match value["type"].as_str() {
+            Some("response.output_text.delta" | "response.refusal.delta") => {
+                (value["delta"].as_str().unwrap_or("").into(), false)
+            }
+            Some("response.completed") if value["response"]["status"] == "completed" => {
+                (String::new(), true)
+            }
+            Some("response.failed" | "response.incomplete") => {
+                return Err(
+                    "Responses APIの生成が完了しませんでした。途中の回答を保持しています".into(),
+                )
+            }
+            Some("response.completed") => return Err("Responses APIの終端状態が不正です".into()),
+            _ => (String::new(), false),
+        },
         ApiProtocol::Openai => {
             let choice = &value["choices"][0];
             (
@@ -284,6 +309,43 @@ mod tests {
         thread,
         time::Instant,
     };
+    #[test]
+    fn responses_incomplete_streams_keep_partial_text_and_never_report_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = api(listener.local_addr().unwrap(), ApiProtocol::Responses);
+        let worker = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_request(&mut socket);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+            socket
+                .write_all(
+                    frame(json!({"type":"response.output_text.delta","delta":"途中の回答"}))
+                        .as_bytes(),
+                )
+                .unwrap();
+            socket.write_all(frame(json!({"type":"response.incomplete","response":{"status":"incomplete","error":"private-fixture-key"}})).as_bytes()).unwrap();
+        });
+        let mut events = vec![];
+        stream_messages(
+            &Config::default(),
+            Backend::Custom,
+            &api,
+            None,
+            &[ChatMessage::user("input")],
+            &AtomicBool::new(false),
+            |e| events.push(e),
+        );
+        worker.join().unwrap();
+        assert_eq!(events[0], StreamEvent::Delta("途中の回答".into()));
+        assert!(
+            matches!(events.last(),Some(StreamEvent::Finished(StreamEnd::Failed(error))) if !error.contains("private-fixture-key"))
+        );
+        assert!(crate::api::extract_text(
+            ApiProtocol::Responses,
+            &json!({"status":"incomplete","output":[]})
+        )
+        .is_err());
+    }
 
     fn read_request(stream: &mut TcpStream) -> (String, Value) {
         stream
@@ -325,6 +387,7 @@ mod tests {
     fn all_protocols_deliver_split_japanese_before_the_terminal_event_and_keep_roles() {
         for protocol in [
             ApiProtocol::Openai,
+            ApiProtocol::Responses,
             ApiProtocol::Claude,
             ApiProtocol::Gemini,
         ] {
@@ -335,6 +398,12 @@ mod tests {
                 let (mut socket, _) = listener.accept().unwrap();
                 let (header, body) = read_request(&mut socket);
                 let first = match protocol {
+                    ApiProtocol::Responses => {
+                        assert!(header.starts_with("POST /v1/responses "));
+                        assert_eq!(body["input"][1]["role"], "assistant");
+                        assert_eq!(body["store"], false);
+                        json!({"type":"response.output_text.delta","delta":"日本語"})
+                    }
                     ApiProtocol::Openai => {
                         assert!(header.starts_with("POST /v1/chat/completions "));
                         assert_eq!(body["stream"], true);
@@ -362,6 +431,9 @@ mod tests {
                 // This cannot complete unless text reaches the caller before EOF.
                 seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                 let last = match protocol {
+                    ApiProtocol::Responses => frame(
+                        json!({"type":"response.completed","response":{"status":"completed"}}),
+                    ),
                     ApiProtocol::Openai => "data: [DONE]\r\n\r\n".to_owned(),
                     ApiProtocol::Claude => frame(json!({"type":"message_stop"})),
                     ApiProtocol::Gemini => frame(json!({"candidates":[{"finishReason":"STOP"}]})),

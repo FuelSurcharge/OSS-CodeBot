@@ -221,6 +221,11 @@ pub fn test_api_model(
             .map_err(http_error)?;
         let value = read(response, true).await?;
         let recognized = match provider.config.protocol {
+            ApiProtocol::Responses => {
+                value["object"] == "response"
+                    && value["status"] == "completed"
+                    && value["output"].is_array()
+            }
             ApiProtocol::Openai => value["choices"]
                 .as_array()
                 .is_some_and(|c| !c.is_empty() && c[0]["message"].is_object()),
@@ -453,6 +458,42 @@ mod tests {
             test_api_model(backend, &api, Some("fixture-key"), &cancel).unwrap();
             worker.join().unwrap();
         }
+    }
+    #[test]
+    fn responses_diagnostics_use_models_and_a_nonstored_fixed_probe() {
+        let (base, worker) = fixture(
+            vec![
+                Response {
+                    status: 200,
+                    body: json!({"data":[{"id":"responses-fixture"}]}),
+                },
+                Response {
+                    status: 200,
+                    body: json!({"object":"response","status":"completed","output":[]}),
+                },
+            ],
+            |index, header, body| {
+                if index == 0 {
+                    assert!(header.starts_with("GET /v1/models "));
+                } else {
+                    assert!(header.starts_with("POST /v1/responses "));
+                    assert_eq!(body["input"].as_array().unwrap().len(), 1);
+                    assert_eq!(body["input"][0]["content"], "Reply OK.");
+                    assert_eq!(body["store"], false);
+                    assert_eq!(body["max_output_tokens"], 16);
+                }
+            },
+        );
+        let config = config(base, ApiProtocol::Responses);
+        let cancel = AtomicBool::new(false);
+        assert!(
+            list_api_models(Backend::Custom, &config, Some("fixture-key"), &cancel)
+                .unwrap()
+                .models
+                .contains(&"responses-fixture".to_owned())
+        );
+        test_api_model(Backend::Custom, &config, Some("fixture-key"), &cancel).unwrap();
+        worker.join().unwrap();
     }
     #[test]
     fn gemini_and_claude_pagination_are_bounded_and_keep_manual_ids() {

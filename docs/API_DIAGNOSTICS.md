@@ -28,7 +28,7 @@ ClaudeとGeminiのページ送りに対応し、10ページ・1000件を上限�
 
 | サービス | 一覧の実装 | 模擬検証モデル | 検証方法・制約 |
 |---|---|---|---|
-| OpenAI | GET /models | test-model | OpenAI形式・Bearerを模擬検証。実API未検証 |
+| OpenAI | GET /models | test-model | Chat Completions/Responses形式・Bearer・Responsesのstore=falseを模擬検証。実API未検証 |
 | Gemini | GET /models、pageToken | test-model / one / two | Gemini形式・x-goog-api-key・生成可能モデルの抽出を模擬検証。実API未検証 |
 | Claude | GET /models、after_id | test-model / one / two | Messages形式・x-api-key・anthropic-versionを模擬検証。実API未検証 |
 | DeepSeek | GET /models | test-model | OpenAI互換形式を模擬検証。実API未検証 |
@@ -37,7 +37,7 @@ ClaudeとGeminiのページ送りに対応し、10ページ・1000件を上限�
 | Grok | GET /models | test-model | OpenAI互換形式を模擬検証。実API未検証 |
 | MiMo | 一覧未確認、手入力 | なし | 一覧未確認と表示。api-keyヘッダーは既存API共通テストで検証。実API未検証 |
 | Kimi | GET /models | test-model | OpenAI互換形式を模擬検証。実API未検証 |
-| カスタム | 設定した3プロトコルの/models | test-model / local-diagnostic-model / review-model | 3形式の模擬テスト。Linux実GUIはOpenAI互換の一覧取得・選択・確認付き送信を実操作 |
+| カスタム | 設定した4プロトコルの/models | test-model / local-diagnostic-model / review-model / responses-fixture | 4形式の模擬テスト。Linux実GUIはOpenAI互換の一覧取得・選択・確認付き送信を実操作 |
 
 一覧経路がないカスタム接続先には未対応を表示する。提供元・地域・ゲートウェイでAPI経路が異なる場合は手入力と生成による接続確認を使用する。
 実API用キーを用いていないサービスを接続検証済みと扱わない。サービス側のモデル提供状況は別途確認する。

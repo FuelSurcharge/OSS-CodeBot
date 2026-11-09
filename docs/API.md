@@ -46,11 +46,11 @@ GLM `https://open.bigmodel.cn/api/paas/v4`、Kimi `https://api.moonshot.cn/v1` �
 
 Geminiは `x-goog-api-key`、Claudeは `x-api-key` と `anthropic-version`、
 MiMoは `api-key`、その他のOpenAI互換サービスはBearer認証を使用します。
-OpenAIはChat Completions対応モデルを使用してください。Responses APIには未対応です。
+OpenAIはChat CompletionsとResponses APIを明示的に選択できます。選択した形式に対応するモデルを使用してください。[Responsesと確認付きツール相談](AI_TOOLS.md)。
 
 ## カスタムAPI
 
-OpenAI互換・Gemini・Claude Messagesの3形式から選べます。
+OpenAI Chat Completions互換・OpenAI Responses・Gemini・Claude Messagesの4形式から選べます。
 任意のREST APIのスキーマを自動変換する機能ではありません。
 ローカルモデルサーバーには、例えば `http://127.0.0.1:1234/v1` を設定し、
 必要に応じて「キーなし接続を許可」を有効にします。
@@ -69,7 +69,7 @@ cargo run -p codebot-cli -- --config config/api.example.toml "このエラーを
 
 `provider` の指定値は `rules`, `local`, `openai`, `gemini`, `claude`, `deepseek`, `qwen`,
 `glm`, `grok`, `mimo`, `kimi`, `custom` です。
-カスタムでは `[api]` の `protocol` に `openai`, `gemini`, `claude` のいずれかを指定します。
+カスタムでは `[api]` の `protocol` に `openai`, `responses`, `gemini`, `claude` のいずれかを指定します。OpenAIでは`openai`が既定で、`responses`も選択できます。
 
 ## 送信内容と確認範囲
 
@@ -77,15 +77,15 @@ cargo run -p codebot-cli -- --config config/api.example.toml "このエラーを
 GUIでは「会話履歴を含める」で過去の成功した会話も送信できます。初期値は無効です。CLIの`--interactive`では履歴を含めて送信します。
 ローカルファイルは、作業フォルダと行範囲を選びプレビューして添付したものだけを送信します。リポジトリ全体を自動で送信しません。
 詳しくは[継続対話・保存](CONVERSATIONS.md)と[ファイルの参照](WORKSPACES.md)を参照してください。
-応答は完成後に表示します。利用料金、モデル可用性、データの扱いは契約先に従います。
+通常のGUIチャットとCLIの`--stream`は逐次表示に対応します。利用料金、モデル可用性、データの扱いは契約先に従います。
 
 HTTP認証・タイムアウト・JSON解析・空応答の失敗は画面または標準エラーに表示します。
 キーやサーバーのエラー本文はログ出力しません。エラー表示はHTTPステータスなどに限定します。
 TLS証明書検証は有効です。必要な環境ではOSの信頼済み証明書・プロキシ設定を使用してください。
 Linuxのビルドには `pkg-config` と `libssl-dev` が必要です。
 
-3形式とMiMoの認証ヘッダーをローカル模擬HTTPサーバーで検証し、GUI・CLIからも送受信を確認しました。
+4形式とMiMoの認証ヘッダーをローカル模擬HTTPサーバーで検証し、GUI・CLIからも送受信を確認しました。
 プリセットの各社アカウントを使った実API接続は、APIキーがないため未検証です。
-特に各モデル固有の追加パラメーターやResponses API・ツール呼出しには未対応です。
+各モデル固有の追加パラメーターや組み込みツールへの自動対応は提供しません。確認付きのファイル変更・コマンド提案は[ツール相談](AI_TOOLS.md)で扱います。
 
 ローカルGGUFモデルは [ローカルモデル設定](LOCAL_MODELS.md) を参照してください。
