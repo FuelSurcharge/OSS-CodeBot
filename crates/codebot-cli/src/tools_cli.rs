@@ -11,7 +11,7 @@ use std::{
     },
     time::Duration,
 };
-fn confirm(word: &str, cancel: &AtomicBool) -> Result<bool, String> {
+pub(super) fn confirm(word: &str, cancel: &AtomicBool) -> Result<bool, String> {
     eprintln!("表示した内容を確認し、続ける場合は {word} と入力してください:");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -74,100 +74,12 @@ pub(super) fn run(args: &Args) -> Result<(), String> {
             call.id,
             serde_json::to_string_pretty(&call.arguments).unwrap()
         );
-        let result = match call.action(conversation.root())? {
-            ToolAction::Command(spec) => match codebot_core::prepare_command(&spec) {
-                Ok(prepared) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(prepared.preview()).unwrap()
-                    );
-                    if !confirm("run", &cancel)? {
-                        ToolResult {
-                            status: ToolStatus::Rejected,
-                            summary: "利用者がコマンド提案を拒否しました。実行していません。"
-                                .into(),
-                        }
-                    } else {
-                        let mut output = String::new();
-                        let report = codebot_core::run_command(&prepared, &cancel, |event| {
-                            let text = match event {
-                                CommandEvent::Stdout(text) => {
-                                    print!("{text}");
-                                    let _ = io::stdout().flush();
-                                    text
-                                }
-                                CommandEvent::Stderr(text) => {
-                                    eprint!("{text}");
-                                    text
-                                }
-                            };
-                            output.push_str(&text);
-                        });
-                        let summary = format!(
-                            "{}\n出力：\n{}",
-                            serde_json::to_string(&report).unwrap(),
-                            output
-                        );
-                        let summary = if summary.chars().count() > 12000 {
-                            format!(
-                                "{}\n（以降を省略）",
-                                summary.chars().take(11980).collect::<String>()
-                            )
-                        } else {
-                            summary
-                        };
-                        ToolResult {
-                            status: if report.state == CommandState::Cancelled {
-                                ToolStatus::Cancelled
-                            } else if report.state == CommandState::Exited
-                                && report.exit_code == Some(0)
-                            {
-                                ToolStatus::Succeeded
-                            } else {
-                                ToolStatus::Failed
-                            },
-                            summary,
-                        }
-                    }
-                }
-                Err(error) => ToolResult {
-                    status: ToolStatus::Failed,
-                    summary: error,
-                },
-            },
-            ToolAction::Changes(proposal) => {
-                match codebot_core::prepare_changes(conversation.root(), &proposal) {
-                    Ok(prepared) => {
-                        for preview in prepared.previews() {
-                            println!("{}", preview.diff);
-                        }
-                        let mut journal = codebot_core::new_change_journal_path()?;
-                        if let Some(dir) = &args.tools_journal_dir {
-                            if !dir.is_absolute() {
-                                return Err("変更記録の保存先は絶対パスで指定してください".into());
-                            }
-                            journal = dir.join(journal.file_name().unwrap());
-                        }
-                        println!("変更記録：{}", journal.display());
-                        if !confirm("apply", &cancel)? {
-                            ToolResult {
-                                status: ToolStatus::Rejected,
-                                summary: "利用者が変更案を拒否しました。適用していません。".into(),
-                            }
-                        } else {
-                            match codebot_core::apply_changes(&prepared,&journal) {
-                            Ok(count)=>ToolResult {status:ToolStatus::Succeeded,summary:format!("利用者が確認した変更案を{count}ファイルへ適用しました。変更記録から取り消し可能です。")},
-                            Err(error)=>ToolResult {status:ToolStatus::Failed,summary:error},
-                        }
-                        }
-                    }
-                    Err(error) => ToolResult {
-                        status: ToolStatus::Failed,
-                        summary: error,
-                    },
-                }
-            }
-        };
+        let result = execute_proposal(
+            call,
+            conversation.root(),
+            args.tools_journal_dir.as_deref(),
+            &cancel,
+        )?;
         println!(
             "AIへ送る結果：\n{}",
             serde_json::to_string_pretty(&result).unwrap()
@@ -182,4 +94,103 @@ pub(super) fn run(args: &Args) -> Result<(), String> {
         }
         conversation.resolve(&call.id, &result)?;
     }
+}
+
+pub(super) fn execute_proposal(
+    call: &codebot_core::ToolCall,
+    root: &std::path::Path,
+    journal_dir: Option<&std::path::Path>,
+    cancel: &AtomicBool,
+) -> Result<ToolResult, String> {
+    Ok(match call.action(root)? {
+        ToolAction::Command(spec) => match codebot_core::prepare_command(&spec) {
+            Ok(prepared) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(prepared.preview()).unwrap()
+                );
+                if !confirm("run", cancel)? {
+                    ToolResult {
+                        status: ToolStatus::Rejected,
+                        summary: "利用者がコマンド提案を拒否しました。実行していません。".into(),
+                    }
+                } else {
+                    let mut output = String::new();
+                    let report = codebot_core::run_command(&prepared, cancel, |event| {
+                        let text = match event {
+                            CommandEvent::Stdout(text) => {
+                                print!("{text}");
+                                let _ = io::stdout().flush();
+                                text
+                            }
+                            CommandEvent::Stderr(text) => {
+                                eprint!("{text}");
+                                text
+                            }
+                        };
+                        output.push_str(&text);
+                    });
+                    let summary = format!(
+                        "{}\n出力：\n{}",
+                        serde_json::to_string(&report).unwrap(),
+                        output
+                    );
+                    let summary = if summary.chars().count() > 12000 {
+                        format!(
+                            "{}\n（以降を省略）",
+                            summary.chars().take(11980).collect::<String>()
+                        )
+                    } else {
+                        summary
+                    };
+                    ToolResult {
+                        status: if report.state == CommandState::Cancelled {
+                            ToolStatus::Cancelled
+                        } else if report.state == CommandState::Exited
+                            && report.exit_code == Some(0)
+                        {
+                            ToolStatus::Succeeded
+                        } else {
+                            ToolStatus::Failed
+                        },
+                        summary,
+                    }
+                }
+            }
+            Err(error) => ToolResult {
+                status: ToolStatus::Failed,
+                summary: error,
+            },
+        },
+        ToolAction::Changes(proposal) => match codebot_core::prepare_changes(root, &proposal) {
+            Ok(prepared) => {
+                for preview in prepared.previews() {
+                    println!("{}", preview.diff);
+                }
+                let mut journal = codebot_core::new_change_journal_path()?;
+                if let Some(dir) = journal_dir {
+                    if !dir.is_absolute() {
+                        return Err("変更記録の保存先は絶対パスで指定してください".into());
+                    }
+                    journal = dir.join(journal.file_name().unwrap());
+                }
+                println!("変更記録：{}", journal.display());
+                if !confirm("apply", cancel)? {
+                    ToolResult {
+                        status: ToolStatus::Rejected,
+                        summary: "利用者が変更案を拒否しました。適用していません。".into(),
+                    }
+                } else {
+                    match codebot_core::apply_changes(&prepared,&journal) {
+                            Ok(count)=>ToolResult {status:ToolStatus::Succeeded,summary:format!("利用者が確認した変更案を{count}ファイルへ適用しました。変更記録から取り消し可能です。")},
+                            Err(error)=>ToolResult {status:ToolStatus::Failed,summary:error},
+                        }
+                }
+            }
+            Err(error) => ToolResult {
+                status: ToolStatus::Failed,
+                summary: error,
+            },
+        },
+    })
 }

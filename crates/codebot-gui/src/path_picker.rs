@@ -7,6 +7,7 @@ pub enum Target {
     ModelFolder,
     Python,
     Server,
+    PluginManifest,
 }
 pub struct PathPicker {
     pub target: Target,
@@ -73,6 +74,7 @@ impl PathPicker {
             Target::ModelFolder => "モデルフォルダを選択",
             Target::Python => "Python実行ファイルを選択",
             Target::Server => "llama-serverを選択",
+            Target::PluginManifest => "拡張のmanifestを選択",
         };
         egui::Window::new(title)
             .open(&mut open)
@@ -115,6 +117,11 @@ impl PathPicker {
                                     || path
                                         .extension()
                                         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"));
+                                let selectable = selectable
+                                    && (!matches!(self.target, Target::PluginManifest)
+                                        || path
+                                            .extension()
+                                            .is_some_and(|ext| ext.eq_ignore_ascii_case("json")));
                                 if ui
                                     .add_enabled(selectable, egui::Button::new(name))
                                     .clicked()

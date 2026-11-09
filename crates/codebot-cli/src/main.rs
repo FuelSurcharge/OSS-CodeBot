@@ -1,6 +1,7 @@
 use clap::Parser;
 mod cache_cli;
 mod github_cli;
+mod plugin_cli;
 mod tools_cli;
 use codebot_core::{execute_backend, execute_messages, Backend, ChatMessage, Config};
 use std::{
@@ -16,7 +17,10 @@ use std::{
 #[command(version, about = "OSS CodeBot: local diagnostics and AI APIs")]
 #[command(group(clap::ArgGroup::new("github_action").multiple(false)))]
 #[command(group(clap::ArgGroup::new("cache_action").multiple(false)))]
+#[command(group(clap::ArgGroup::new("plugin_action").multiple(false).conflicts_with_all(["tools","cache_action","config","interactive","stream","diagnose_local","list_models","test_api","run_command","git_status","git_operation","github_repository","proposal","undo","action","preview"])))]
 struct Args {
+    #[command(flatten)]
+    plugin: plugin_cli::PluginArgs,
     /// Ask an API for reviewed change/command proposals; confirm every action and result send.
     #[arg(long,requires_all=["input","workspace"],conflicts_with_all=["interactive","stream","diagnose_local","list_models","test_api","run_command","git_status","git_operation","github_repository","proposal","undo","attach","action","preview","cache_action","yes"])]
     tools: bool,
@@ -156,6 +160,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.plugin.active() {
+        return plugin_cli::run(&args);
+    }
     if args.tools {
         return tools_cli::run(&args);
     }

@@ -50,6 +50,7 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - GGUFのRange/ETag再開と分割パートの取得・検証、空き容量確認、使用中ロックと確認付きキャッシュ削除。[使い方](docs/MODEL_CACHE.md)
 - APIのモデル一覧と確認付き接続診断、認証・権限・モデル・利用制限・応答形式のエラー分類。[使い方](docs/API_DIAGNOSTICS.md)
 - OpenAI Responses API、4形式の共通ツール提案、変更/コマンドの個別確認、結果をAIへ送る前の確認、操作上限と循環検出。[使い方](docs/AI_TOOLS.md)
+- WebAssembly拡張の導入前の権限表示、有効化/無効化/削除、選択した入力の処理、確認付きの変更・コマンド提案。Rust製サンプルと作者向けAPIを同梱。[使い方](docs/PLUGINS.md)
 - 確認付きコマンド実行、標準出力・標準エラーの逐次表示、タイムアウト・停止・子プロセス終了、結果の下書き追加。[使い方](docs/COMMANDS.md)
 - Gitの状態・差分・ブランチ、選択ステージ/解除、コミット文の提案と確認付きコミット・push。[使い方](docs/GIT.md)
 - GitHubのIssue/PR一覧・本文・差分、チャットへの取り込み、Issueからのブランチ準備、確認付きIssue/PR作成・コメントと重複投稿防止。[使い方](docs/GITHUB.md)

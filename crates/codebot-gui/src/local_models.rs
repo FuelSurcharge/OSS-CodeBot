@@ -276,6 +276,7 @@ impl LocalModels {
                         | crate::path_picker::Target::ModelFolder => self.config.model_path = path,
                         crate::path_picker::Target::Python => self.config.python_path = path,
                         crate::path_picker::Target::Server => self.config.server_path = path,
+                        crate::path_picker::Target::PluginManifest => {}
                     }
                     self.server = None;
                 }

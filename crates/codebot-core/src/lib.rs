@@ -1,5 +1,11 @@
 use serde::Deserialize;
 mod ai_tools;
+mod plugins;
+pub use plugins::{
+    default_plugins_dir, install_plugin, list_plugins, prepare_plugin_install,
+    prepare_plugin_remove, remove_plugin, run_plugin, set_plugin_enabled, PluginEntry,
+    PluginManifest, PluginPermission, PluginRun, PreparedPluginInstall, PreparedPluginRemove,
+};
 mod api;
 pub use ai_tools::{
     AgentEvent, AgentReply, ToolAction, ToolCall, ToolConversation, ToolResult, ToolStatus,

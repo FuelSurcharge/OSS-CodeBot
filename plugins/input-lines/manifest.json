@@ -1,0 +1,13 @@
+{
+  "manifest_version": 1,
+  "api_version": 1,
+  "id": "input-lines",
+  "name": "入力の行数",
+  "version": "0.1.0",
+  "description": "渡した入力全体のLFによる行数を表示します。選択したファイルを含む場合も入力全体を数えます。外部通信やファイル変更は行いません。",
+  "module": "plugin.wasm",
+  "sha256": "3bb53ced2567815759568719678ac370686b2b5a063234807a3a6f0e5308a052",
+  "permissions": [
+    "read-selected-files"
+  ]
+}
