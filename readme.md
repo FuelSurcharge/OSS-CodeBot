@@ -67,4 +67,4 @@ LINE Seed JPはGoogle Fonts公式の `ofl/lineseedjp`、BIZ UDPゴシックは `
 
 現在のGUI方針は [DESIGN.md](DESIGN.md)、参照したSkillと適用範囲は [docs/ui-skills/README.md](docs/ui-skills/README.md) に記載しています。
 
-今後の機能は[開発タスク一覧](docs/tasks/README.md)で管理します。優先度・完了条件・依存関係と、GitHubのIssue作成画面へのリンクを用意しています。
+今後の機能は[ISSUES.md](ISSUES.md)と[タスク別のMarkdown](docs/tasks/README.md)で管理します。優先度・進捗・完了条件・依存関係を記録し、実装後にファイルを更新してpushします。
