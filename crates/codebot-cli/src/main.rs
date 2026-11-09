@@ -47,6 +47,14 @@ struct Args {
     /// Display execution details without starting the process.
     #[arg(long, requires = "run_command")]
     command_preview: bool,
+    /// Read Git status, staged/unstaged diffs and branch as JSON.
+    #[arg(long, requires="workspace", conflicts_with_all=["git_operation","input","interactive","stream","diagnose_local","list_models","test_api","proposal","undo","preview","attach","action","run_command","yes"])]
+    git_status: bool,
+    /// Preview and confirm a GitOperation JSON file.
+    #[arg(long, requires="workspace", conflicts_with_all=["git_status","input","interactive","stream","diagnose_local","list_models","test_api","proposal","undo","preview","attach","action","run_command"])]
+    git_operation: Option<PathBuf>,
+    #[arg(long, requires = "git_operation")]
+    git_preview: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -84,6 +92,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.git_status || args.git_operation.is_some() {
+        return git_cli(&args);
+    }
     if args.run_command.is_some() {
         return command_cli(&args);
     }
@@ -200,6 +211,71 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn git_cli(args: &Args) -> Result<(), String> {
+    let root = args
+        .workspace
+        .as_deref()
+        .ok_or("--workspaceを指定してください")?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let signal = cancel.clone();
+    ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))
+        .map_err(|_| "Ctrl+Cの処理を準備できません")?;
+    if args.git_status {
+        let snapshot = codebot_core::git_snapshot(root, &cancel)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&snapshot).map_err(|_| "Git状態を表示できません")?
+        );
+        return Ok(());
+    }
+    let path = args.git_operation.as_ref().unwrap();
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "Git操作ファイルを読めません")?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut raw)
+        .map_err(|_| "Git操作ファイルを読めません")?;
+    if raw.len() > 1024 * 1024 {
+        return Err("Git操作JSONが1 MiBを超えています".into());
+    }
+    let operation: codebot_core::GitOperation =
+        serde_json::from_slice(&raw).map_err(|_| "Git操作JSONの形式が不正です")?;
+    let prepared = codebot_core::prepare_git_operation(root, operation, &cancel)?;
+    println!("{}", prepared.summary());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(prepared.operation())
+            .map_err(|_| "Git操作を表示できません")?
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(prepared.snapshot()).map_err(|_| "Git差分を表示できません")?
+    );
+    if args.git_preview {
+        return Ok(());
+    }
+    if !args.yes {
+        eprintln!("表示したブランチ・対象・差分を確認してください。実行する場合は git と入力してください:");
+        let mut line = String::new();
+        Read::take(io::stdin().lock(), 32)
+            .read_line(&mut line)
+            .map_err(|_| "確認入力を読み込めません")?;
+        if line.trim() != "git" {
+            eprintln!("Git操作を中止しました");
+            return Ok(());
+        }
+    }
+    codebot_core::execute_git_operation(&prepared, &cancel)?;
+    eprintln!("Git操作を完了しました。既存の作業ファイルを自動resetしていません。");
+    let snapshot = codebot_core::git_snapshot(root, &cancel).map_err(|error| {
+        format!("Git操作は完了しましたが、状態の再読み込みに失敗しました：{error}")
+    })?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&snapshot).map_err(|_| "Git状態を表示できません")?
+    );
+    Ok(())
+}
 fn command_cli(args: &Args) -> Result<(), String> {
     let spec = codebot_core::CommandSpec {
         program: args.run_command.clone().unwrap(),

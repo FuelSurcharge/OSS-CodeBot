@@ -55,6 +55,19 @@ pub struct PreparedCommand {
     secrets: Vec<Vec<u8>>,
 }
 impl PreparedCommand {
+    pub(crate) fn environment_override(&mut self, name: &str, value: &str) {
+        self.environment
+            .insert(OsString::from(name), OsString::from(value));
+        if !self.preview.environment_names.iter().any(|n| n == name) {
+            self.preview.environment_names.push(name.into());
+            self.preview.environment_names.sort();
+        }
+        if sensitive(name) && !value.is_empty() {
+            self.secrets.push(value.as_bytes().to_vec());
+            self.secrets.sort_by_key(|v| std::cmp::Reverse(v.len()));
+            self.secrets.dedup();
+        }
+    }
     pub fn preview(&self) -> &CommandPreview {
         &self.preview
     }

@@ -17,7 +17,12 @@ pub use changes::{
     ChangePreview, ChangeProposal, FileChange, LineEdit, PreparedChanges,
 };
 pub use streaming::{stream_messages, StreamEnd, StreamEvent};
+mod git;
 mod local;
+pub use git::{
+    execute_git_operation, git_snapshot, prepare_git_operation, GitFile, GitOperation, GitRemote,
+    GitSnapshot, PreparedGitOperation,
+};
 mod local_diagnostics;
 pub use local_diagnostics::{diagnose_local, DiagnosticItem, LocalDiagnostics};
 mod transformers;
