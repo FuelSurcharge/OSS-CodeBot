@@ -6,6 +6,7 @@ use std::{
     sync::mpsc,
 };
 mod local_models;
+mod markdown;
 mod ui_preferences;
 use local_models::LocalModels;
 use ui_preferences::{apply_font, FontChoice, UiPreferences};
@@ -58,6 +59,7 @@ struct App {
     settings: bool,
     sidebar: bool,
     copied: Option<(usize, usize)>,
+    markdown_cache: egui_commonmark::CommonMarkCache,
     pending: Option<(usize, mpsc::Receiver<Result<String, String>>)>,
 }
 impl Default for App {
@@ -76,6 +78,7 @@ impl Default for App {
             settings: false,
             sidebar: true,
             copied: None,
+            markdown_cache: egui_commonmark::CommonMarkCache::default(),
             pending: None,
         }
     }
@@ -316,13 +319,7 @@ impl App {
                         let body = message
                             .strip_prefix("ルールベース診断（AI未使用）\n")
                             .unwrap_or(message);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(body).size(16.0).line_height(Some(25.0)),
-                            )
-                            .wrap()
-                            .selectable(true),
-                        );
+                        markdown::show(ui, &mut self.markdown_cache, (self.active, index), body);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if icon_button(ui, Icon::Copy, "回答をコピー", true, false).clicked()
