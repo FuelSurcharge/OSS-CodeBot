@@ -35,6 +35,7 @@ pub struct LocalModels {
     progress: Option<DownloadProgress>,
     diagnostics: crate::local_diagnostics::Diagnostics,
     picker: Option<crate::path_picker::PathPicker>,
+    cache: crate::model_cache::CachePanel,
 }
 impl LocalModels {
     pub fn stop(&mut self) {
@@ -56,6 +57,7 @@ impl LocalModels {
         Err("ローカルモデルを先に読み込んでください".into())
     }
     pub fn poll(&mut self) -> bool {
+        self.cache.poll();
         let mut changed = false;
         let mut done = None;
         if let Some(task) = &self.transfer {
@@ -223,7 +225,7 @@ impl LocalModels {
                 let token=ui.label("HFトークン（保存せず、未入力ならHF_TOKENを参照）");
                 ui.add(egui::TextEdit::singleline(&mut self.hf_token).password(true).desired_width(f32::INFINITY)).labelled_by(token.id);
                 ui.horizontal(|ui| {ui.label("取得サイズ上限（GiB）");ui.add(egui::DragValue::new(&mut self.config.max_download_gib).range(1..=4096));});
-                ui.label(if native {"必要な設定・tokenizer・safetensors分割重みを取得・検証します。配布元の独自コードは実行しません。"} else {"分割GGUFの自動取得は未対応です。"});
+                ui.label(if native {"必要な設定・tokenizer・safetensors分割重みを取得・検証します。配布元の独自コードは実行しません。"} else {"分割GGUFは00001のURLを指定すると、全パートを同じコミットから取得・検証します。中断した取得は再実行で再開します。"});
                 ui.label("公開条件・ライセンスへの同意はHugging Face側で行ってください。");
             });
             if ui.add_enabled(!self.config.hf_url.trim().is_empty(),egui::Button::new("Hugging Faceから取得")).clicked() {self.download(ui.ctx());}
@@ -312,6 +314,9 @@ impl LocalModels {
         if self.server.is_some() {
             ui.label("読み込み済み。このPC上で推論します。");
         }
+        ui.collapsing("モデルキャッシュ", |ui| {
+            self.cache.ui(ui, !busy && self.server.is_none())
+        });
         if let Some(message) = &self.message {
             ui.label(message);
         }

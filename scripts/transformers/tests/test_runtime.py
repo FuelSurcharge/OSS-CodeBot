@@ -16,6 +16,18 @@ spec.loader.exec_module(runtime)
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_snapshot_preflight_refuses_insufficient_disk_before_downloading(self):
+        entry = types.SimpleNamespace(rfilename="model.safetensors", size=128)
+        config = types.SimpleNamespace(rfilename="config.json", size=20)
+        fake = types.SimpleNamespace(
+            HfApi=lambda **kwargs: types.SimpleNamespace(model_info=lambda *args, **kwargs: types.SimpleNamespace(sha="pinned", siblings=[entry,config])),
+            hf_hub_download=lambda *args, **kwargs: self.fail("download must not start"),
+        )
+        with tempfile.TemporaryDirectory() as root, patch.dict(sys.modules, {"huggingface_hub":fake}), patch("sys.stdin",io.StringIO(json.dumps({"repo":"owner/model","revision":"main","cache":root,"max_bytes":1000}))), patch.object(runtime.shutil,"disk_usage",return_value=types.SimpleNamespace(free=10)), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(runtime.RuntimeFailure) as error:
+                runtime.download()
+            self.assertEqual(error.exception.code,"disk")
+
     def test_multi_turn_validation_and_template_free_transcript(self):
         messages = [{"role":"user", "content":"first"}, {"role":"assistant", "content":"answer"}, {"role":"user", "content":"second"}]
         self.assertTrue(runtime.valid_messages(messages))

@@ -20,6 +20,7 @@ mod github_panel;
 mod local_diagnostics;
 mod local_models;
 mod markdown;
+mod model_cache;
 mod path_picker;
 mod ui_preferences;
 mod workspace_panel;

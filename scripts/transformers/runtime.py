@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import queue
+import shutil
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -102,6 +103,12 @@ def download():
     total = sum(s.size for s in siblings)
     if total > options["max_bytes"]:
         raise RuntimeFailure("size")
+    # Conservative preflight, including the full snapshot. Existing hub blobs
+    # may reduce actual downloads, but do not silently assume they are verified.
+    cache = Path(options["cache"])
+    cache.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(cache).free < total + 64 * 1024 * 1024:
+        raise RuntimeFailure("disk")
     received = 0
     root = None
     # Pin every download to the exact commit returned by the metadata request.

@@ -1,4 +1,5 @@
 use clap::Parser;
+mod cache_cli;
 mod github_cli;
 use codebot_core::{execute_backend, execute_messages, Backend, ChatMessage, Config};
 use std::{
@@ -13,7 +14,10 @@ use std::{
 #[derive(Parser)]
 #[command(version, about = "OSS CodeBot: local diagnostics and AI APIs")]
 #[command(group(clap::ArgGroup::new("github_action").multiple(false)))]
+#[command(group(clap::ArgGroup::new("cache_action").multiple(false)))]
 struct Args {
+    #[command(flatten)]
+    cache: cache_cli::Args,
     /// Input text; reads stdin when omitted
     input: Option<String>,
     #[arg(long)]
@@ -146,6 +150,9 @@ struct Args {
 }
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    if args.cache.cache_list || args.cache.cache_delete.is_some() {
+        return cache_cli::run(&args.cache, args.yes);
+    }
     if args.github_repository.is_some() {
         return github_cli::run(&args);
     }

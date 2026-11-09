@@ -1,16 +1,15 @@
 use crate::{ApiConfig, ApiProvider, Backend, Config};
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::File,
+    io::Read,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,15 +155,7 @@ pub struct DownloadProgress {
 fn is_hash(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
-fn hash_header(h: &reqwest::header::HeaderMap) -> Option<String> {
-    ["x-linked-etag", "etag"]
-        .into_iter()
-        .filter_map(|k| h.get(k)?.to_str().ok())
-        .map(|v| v.trim_matches('"'))
-        .find(|s| is_hash(s))
-        .map(str::to_ascii_lowercase)
-}
-fn normalize_hf_url(raw: &str) -> Result<Url, String> {
+pub(crate) fn normalize_hf_url(raw: &str) -> Result<Url, String> {
     let mut u =
         Url::parse(raw.trim()).map_err(|_| "Hugging FaceのGGUFファイルURLを指定してください")?;
     if u.scheme() != "https"
@@ -199,20 +190,25 @@ fn normalize_hf_url(raw: &str) -> Result<Url, String> {
             "リポジトリのページではなく、GGUFファイルのblob/resolve URLを指定してください".into(),
         );
     }
-    if parts
-        .last()
-        .unwrap()
-        .trim_end_matches(".gguf")
-        .rsplit_once("-of-")
-        .is_some_and(|(_, n)| n.len() == 5 && n.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return Err("分割GGUFの自動取得には未対応です。全パートを同じフォルダに配置し、先頭ファイルのローカルパスを指定してください".into());
-    }
     parts[2] = "resolve".into();
     u.set_path(&parts.join("/"));
     Ok(u)
 }
 pub fn validate_gguf(path: &Path) -> Result<(), String> {
+    if let Some(names) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(crate::gguf_download::split_names)
+        .transpose()?
+        .flatten()
+    {
+        for name in names {
+            validate_gguf_header(&path.with_file_name(name))?;
+        }
+    }
+    validate_gguf_header(path)
+}
+pub(crate) fn validate_gguf_header(path: &Path) -> Result<(), String> {
     let mut f = File::open(path)
         .map_err(|_| "GGUFファイルを読み込めません。ローカルパスを確認してください")?;
     let mut header = [0u8; 8];
@@ -234,30 +230,6 @@ pub fn validate_gguf(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-struct RemoveOnDrop(PathBuf);
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-fn file_hash(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
-    let mut f = File::open(path).map_err(|_| "モデルを検証できません")?;
-    let mut h = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("キャンセルしました".into());
-        }
-        let n = f.read(&mut buf).map_err(|_| "モデルを検証できません")?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", h.finalize()))
-}
-/// Downloads only a user-selected HF GGUF. Redirects may go to HF-owned CDNs;
-/// authentication is sent only to huggingface.co. Files are installed after hashing.
 pub fn download_hf_model(
     config: &LocalConfig,
     cache: &Path,
@@ -266,173 +238,16 @@ pub fn download_hf_model(
     progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf, String> {
     if config.engine == LocalEngine::Transformers {
+        let _lease = crate::model_cache::lease(cache, true)?;
         return crate::transformers::download_model(config, cache, token, cancel, progress);
     }
-    config.validate_source()?;
-    let source = normalize_hf_url(&config.hf_url)?;
-    if !(1..=4096).contains(&config.max_download_gib) {
-        return Err("ダウンロード上限は1〜4096 GiBで指定してください".into());
-    }
-    let limit = u64::from(config.max_download_gib) * 1024 * 1024 * 1024;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(24 * 60 * 60))
-        .connect_timeout(Duration::from_secs(20))
-        .redirect(Policy::none())
-        .build()
-        .map_err(|_| "ダウンロード接続を準備できません")?;
-    let request = |method: reqwest::Method, url: Url| {
-        let r = client.request(method, url.clone());
-        if url.host_str() == Some("huggingface.co") {
-            if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
-                return r.bearer_auth(t);
-            }
-        }
-        r
-    };
-    let head = request(reqwest::Method::HEAD, source.clone())
-        .send()
-        .map_err(|_| "Hugging Faceに接続できません。通信設定を確認してください")?;
-    if head.status().is_client_error() || head.status().is_server_error() {
-        return Err(format!("モデル情報を取得できません（HTTP {}）。URL・公開範囲・利用同意・HFトークンを確認してください",head.status().as_u16()));
-    }
-    let from_server = hash_header(head.headers());
-    let expected = if config.sha256.trim().is_empty() {
-        from_server
-            .clone()
-            .ok_or("配布元からSHA-256を取得できません。配布元のSHA-256を入力してください")?
-    } else {
-        config.sha256.trim().to_ascii_lowercase()
-    };
-    if from_server.is_some_and(|h| h != expected) {
-        return Err("指定SHA-256と配布元のSHA-256が一致しません".into());
-    }
-    fs::create_dir_all(cache).map_err(|_| "モデル保存フォルダを作成できません")?;
-    let destination = cache.join(format!("{expected}.gguf"));
-    if destination.exists() {
-        validate_gguf(&destination)?;
-        if file_hash(&destination, cancel)? != expected {
-            return Err(
-                "保存済みモデルのSHA-256が一致しません。破損ファイルを退避して再取得してください"
-                    .into(),
-            );
-        }
-        return Ok(destination);
-    }
-    let lock = cache.join(format!("{expected}.lock"));
-    let _lockfile = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-        .map_err(|_| {
-            "同じモデルを取得中です。以前の取得が中断した場合はキャッシュのlockを確認してください"
-        })?;
-    let _lock_guard = RemoveOnDrop(lock);
-    let mut url = source;
-    let mut response = None;
-    for _ in 0..8 {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("キャンセルしました".into());
-        }
-        let r = request(reqwest::Method::GET, url.clone())
-            .send()
-            .map_err(|_| "モデルの取得に失敗しました。通信設定を確認してください")?;
-        if r.status().is_redirection() {
-            let next = r
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
-                .ok_or("転送先が不正です")?;
-            url = url.join(next).map_err(|_| "転送先が不正です")?;
-            let host = url.host_str().unwrap_or_default();
-            if url.scheme() != "https"
-                || !(host == "huggingface.co"
-                    || host.ends_with(".huggingface.co")
-                    || host.ends_with(".hf.co"))
-                || !url.username().is_empty()
-                || url.password().is_some()
-            {
-                return Err("Hugging Face管理外の転送先にはダウンロードしません".into());
-            }
-            continue;
-        }
-        if !r.status().is_success() {
-            return Err(format!(
-                "モデルを取得できません（HTTP {}）",
-                r.status().as_u16()
-            ));
-        }
-        response = Some(r);
-        break;
-    }
-    let response = response.ok_or("転送回数が上限を超えました")?;
-    install_download(response, &destination, &expected, limit, cancel, progress)
-}
-fn install_download(
-    mut response: reqwest::blocking::Response,
-    destination: &Path,
-    expected: &str,
-    limit: u64,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(DownloadProgress),
-) -> Result<PathBuf, String> {
-    let cache = destination.parent().ok_or("モデル保存先が不正です")?;
-
-    let total = response.content_length();
-    if total.is_some_and(|n| n > limit) {
-        return Err("モデルが設定したダウンロード上限を超えています".into());
-    }
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp = cache.join(format!("{expected}-{unique}.part"));
-    let guard = RemoveOnDrop(temp.clone());
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|_| "モデル保存先を作成できません")?;
-    let mut h = Sha256::new();
-    let mut received = 0;
-    let mut buf = [0u8; 65536];
-    progress(DownloadProgress { received, total });
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("キャンセルしました".into());
-        }
-        let n = response
-            .read(&mut buf)
-            .map_err(|_| "ダウンロードが中断されました。再取得してください")?;
-        if n == 0 {
-            break;
-        }
-        received += n as u64;
-        if received > limit {
-            return Err("ダウンロード上限を超えました".into());
-        }
-        output
-            .write_all(&buf[..n])
-            .map_err(|_| "モデルを保存できません。空き容量を確認してください")?;
-        h.update(&buf[..n]);
-        progress(DownloadProgress { received, total });
-    }
-    if total.is_some_and(|n| received != n) {
-        return Err("ダウンロードサイズが一致しません".into());
-    }
-    if format!("{:x}", h.finalize()) != expected {
-        return Err("SHA-256が一致しないためモデルを使用しません".into());
-    }
-    output.sync_all().map_err(|_| "モデルを保存できません")?;
-    drop(output);
-    validate_gguf(&temp)?;
-    fs::rename(&temp, &destination).map_err(|_| "取得済みモデルを配置できません")?;
-    drop(guard);
-    Ok(destination.to_path_buf())
+    crate::gguf_download::download(config, cache, token, cancel, progress)
 }
 
 pub struct LocalServer {
     child: Child,
     connection: LocalConnection,
+    _cache_lease: Option<crate::model_cache::CacheLease>,
 }
 #[derive(Clone)]
 pub struct LocalConnection {
@@ -480,6 +295,10 @@ impl LocalConnection {
 impl LocalServer {
     pub fn start(config: &LocalConfig, cancel: &AtomicBool) -> Result<Self, String> {
         let path = Path::new(config.model_path.trim());
+        let cache_lease = crate::model_cache::model_lease(path)?;
+        if config.engine == LocalEngine::LlamaCpp {
+            crate::gguf_download::validate_managed(path, cancel)?;
+        }
         match config.engine {
             LocalEngine::LlamaCpp => validate_gguf(path)?,
             LocalEngine::Transformers => crate::transformers::validate_folder(path)?,
@@ -556,7 +375,11 @@ impl LocalServer {
                 ..Default::default()
             },
         };
-        let mut server = Self { child, connection };
+        let mut server = Self {
+            child,
+            connection,
+            _cache_lease: cache_lease,
+        };
         let client = Client::builder()
             .timeout(Duration::from_secs(2))
             .redirect(Policy::none())
@@ -612,7 +435,9 @@ impl Drop for LocalServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     struct TestDir(PathBuf);
     impl TestDir {
@@ -656,92 +481,9 @@ mod tests {
             "https://huggingface.co/user/repo/resolve/main/model.gguf?token=secret",
             "https://u:secret@huggingface.co/user/repo/resolve/main/model.gguf",
             "https://huggingface.co/user/repo/resolve/main/model.safetensors",
-            "https://huggingface.co/user/repo/resolve/main/model-00001-of-00003.gguf",
         ] {
             assert!(normalize_hf_url(url).is_err(), "{url}");
         }
-    }
-    #[test]
-    fn downloaded_checksum_headers_are_sha256_not_git_sha1() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert(
-            "etag",
-            reqwest::header::HeaderValue::from_static(
-                "\"0123456789012345678901234567890123456789\"",
-            ),
-        );
-        assert!(hash_header(&h).is_none());
-        h.insert(
-            "x-linked-etag",
-            reqwest::header::HeaderValue::from_static(
-                "\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
-            ),
-        );
-        assert!(hash_header(&h).is_some());
-    }
-    fn response(bytes: Vec<u8>) -> reqwest::blocking::Response {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            );
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.write_all(&bytes);
-        });
-        Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .get(format!("http://{address}"))
-            .send()
-            .unwrap()
-    }
-    #[test]
-    fn downloads_install_only_after_sha256_verification_and_clean_partial_files() {
-        let dir = TestDir::new();
-        let file = dir.0.join("model.gguf");
-        let bytes = fixture();
-        let hash = format!("{:x}", Sha256::digest(&bytes));
-        let cancel = AtomicBool::new(false);
-        let mut received = 0;
-        install_download(response(bytes.clone()), &file, &hash, 1024, &cancel, |p| {
-            received = p.received
-        })
-        .unwrap();
-        assert_eq!(fs::read(&file).unwrap(), bytes);
-        assert_eq!(received, 64);
-        assert!(validate_gguf(&file).is_ok());
-        let invalid = dir.0.join("invalid.gguf");
-        assert!(install_download(
-            response(bytes.clone()),
-            &invalid,
-            &"a".repeat(64),
-            1024,
-            &cancel,
-            |_| {}
-        )
-        .is_err());
-        assert!(!invalid.exists());
-        let cancelled = AtomicBool::new(true);
-        assert!(install_download(
-            response(bytes.clone()),
-            &invalid,
-            &hash,
-            1024,
-            &cancelled,
-            |_| {}
-        )
-        .is_err());
-        assert!(install_download(response(bytes), &invalid, &hash, 8, &cancel, |_| {}).is_err());
-        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
     }
     #[test]
     fn bad_local_paths_and_wrong_formats_are_rejected_before_spawning() {
@@ -766,6 +508,7 @@ mod tests {
         let dir = TestDir::new();
         let model = dir.0.join("model with spaces;not-a-command.gguf");
         fs::write(&model, fixture()).unwrap();
+        drop(crate::model_cache::lease(&dir.0, true).unwrap());
         let runner = dir.0.join("fake-llama-server");
         fs::write(&runner,r#"#!/usr/bin/env python3
 import sys,json
@@ -800,6 +543,7 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
             ..Default::default()
         };
         let server = LocalServer::start(&config, &AtomicBool::new(false)).unwrap();
+        assert!(crate::model_cache::lease(&dir.0, true).is_err());
         let connection = server.connection();
         assert!(!format!("{connection:?}").contains(&connection.key));
         assert_eq!(
@@ -835,6 +579,7 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
         );
         let base = connection.api.base_url.clone();
         drop(server);
+        assert!(crate::model_cache::lease(&dir.0, true).is_ok());
         assert!(Client::builder()
             .timeout(Duration::from_secs(1))
             .build()

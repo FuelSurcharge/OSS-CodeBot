@@ -47,6 +47,7 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - 構造化した変更案の差分表示、変更箇所を選んだ確認付き適用、競合検出、再起動後の取り消し。[使い方](docs/CHANGES.md)
 - API・ローカルAIの回答を逐次表示、GUIの停止とCLIの`--stream`・Ctrl+C、途中回答の保持。[使い方](docs/STREAMING.md)
 - ローカル実行環境・モデル形式・CPU/GPUの診断、実行ファイルとモデルの選択、専用仮想環境への導入・復旧手順。[使い方](docs/LOCAL_DIAGNOSTICS.md)
+- GGUFのRange/ETag再開と分割パートの取得・検証、空き容量確認、使用中ロックと確認付きキャッシュ削除。[使い方](docs/MODEL_CACHE.md)
 - APIのモデル一覧と確認付き接続診断、認証・権限・モデル・利用制限・応答形式のエラー分類。[使い方](docs/API_DIAGNOSTICS.md)
 - 確認付きコマンド実行、標準出力・標準エラーの逐次表示、タイムアウト・停止・子プロセス終了、結果の下書き追加。[使い方](docs/COMMANDS.md)
 - Gitの状態・差分・ブランチ、選択ステージ/解除、コミット文の提案と確認付きコミット・push。[使い方](docs/GIT.md)

@@ -24,10 +24,16 @@ pub use github::{
     GithubDocument, GithubError, GithubErrorKind, GithubItem, GithubKind, GithubPostRecord,
     GithubReceipt, GithubRepository, GithubWrite, PreparedGithubWrite,
 };
+mod gguf_download;
 mod local;
+mod model_cache;
 pub use git::{
     execute_git_operation, git_snapshot, prepare_git_operation, GitFile, GitOperation, GitRemote,
     GitSnapshot, PreparedGitOperation,
+};
+pub use model_cache::{
+    delete_model_cache, model_cache_inventory, prepare_cache_delete, ModelCacheEntry,
+    ModelCacheInventory, PreparedCacheDelete,
 };
 mod local_diagnostics;
 pub use local_diagnostics::{diagnose_local, DiagnosticItem, LocalDiagnostics};
