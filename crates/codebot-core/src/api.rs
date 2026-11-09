@@ -241,6 +241,9 @@ impl std::fmt::Debug for ApiProvider {
     }
 }
 impl ApiProvider {
+    pub(crate) fn contains_credential(&self, value: &str) -> bool {
+        !self.key.is_empty() && value.contains(&self.key)
+    }
     pub fn new(
         backend: Backend,
         config: &ApiConfig,

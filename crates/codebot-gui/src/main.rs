@@ -11,6 +11,7 @@ use std::{
         mpsc, Arc,
     },
 };
+mod api_diagnostics;
 mod change_panel;
 mod chat_storage;
 mod local_diagnostics;
@@ -127,6 +128,7 @@ struct App {
     backend: Backend,
     api_configs: BTreeMap<Backend, ApiConfig>,
     api_key: String,
+    api_diagnostics: api_diagnostics::ApiDiagnostics,
     local: LocalModels,
     font: FontChoice,
     preferences_path: Option<PathBuf>,
@@ -170,6 +172,7 @@ impl Default for App {
             backend: Backend::Rules,
             api_configs: BTreeMap::new(),
             api_key: String::new(),
+            api_diagnostics: api_diagnostics::ApiDiagnostics::default(),
             local: LocalModels::default(),
             font: FontChoice::default(),
             preferences_path: None,
@@ -1005,6 +1008,7 @@ impl App {
                 });
         });
         if self.backend != previous {
+            self.api_diagnostics.cancel();
             self.api_key.clear();
             if previous == Backend::Local {
                 self.local.stop();
@@ -1102,6 +1106,8 @@ impl App {
         });
         ui.add_space(8.0);
         ui.label(RichText::new("送信時は今回の入力と選択した添付を上記URLに送ります。履歴送信を有効にした場合は過去の会話も含みます。利用料金は各サービスに従います。").size(12.0).color(MUTED));
+        self.api_diagnostics
+            .ui(ui, self.backend, api, &self.api_key, self.pending.is_none());
         if ui.button("API設定を保存").clicked() {
             self.save_preferences();
         }

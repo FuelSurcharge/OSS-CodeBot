@@ -25,6 +25,12 @@ struct Args {
     /// Diagnose the selected local runtimes and model without inference/install.
     #[arg(long, conflicts_with_all = ["input", "interactive", "stream", "workspace", "proposal", "undo", "yes", "preview", "action"])]
     diagnose_local: bool,
+    /// Fetch model IDs without a generation request.
+    #[arg(long, conflicts_with_all = ["test_api", "diagnose_local", "input", "interactive", "stream", "workspace", "proposal", "undo", "yes", "preview", "action"])]
+    list_models: bool,
+    /// Confirm and send a generation request; API charges may apply.
+    #[arg(long, conflicts_with_all = ["list_models", "diagnose_local", "input", "interactive", "stream", "workspace", "proposal", "undo", "preview", "action"])]
+    test_api: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -65,10 +71,40 @@ fn run() -> Result<(), String> {
     if args.proposal.is_some() || args.undo.is_some() {
         return change_command(&args);
     }
-    if args.yes {
-        return Err("--yesは変更の適用・取り消し時だけ指定できます".into());
+    if args.yes && !args.test_api {
+        return Err("--yesは変更の適用・取り消し、API接続確認時だけ指定できます".into());
     }
     let c = Config::load(args.config.as_deref())?;
+    if args.list_models || args.test_api {
+        let backend = Backend::from_id(&c.provider).ok_or("対応していないプロバイダーです")?;
+        if args.list_models {
+            let report =
+                codebot_core::list_api_models(backend, &c.api, None, &AtomicBool::new(false))
+                    .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|_| "モデル一覧を出力できません")?
+            );
+        } else {
+            c.api.resolved(backend).validate_url()?;
+            eprintln!("{}、モデル {}、接続先 {} へ固定の診断入力を送信します。設定の出力上限 {} トークンを使い、API料金が発生する場合があります。会話本文は送りません。",backend.label(),c.api.model,c.api.resolved(backend).base_url,c.api.max_output_tokens);
+            if !args.yes {
+                eprintln!("実行する場合は test と入力してください:");
+                let mut line = String::new();
+                Read::take(io::stdin().lock(), 32)
+                    .read_line(&mut line)
+                    .map_err(|_| "確認入力を読み込めません")?;
+                if line.trim() != "test" {
+                    eprintln!("接続確認を中止しました");
+                    return Ok(());
+                }
+            }
+            codebot_core::test_api_model(backend, &c.api, None, &AtomicBool::new(false))
+                .map_err(|e| e.to_string())?;
+            println!("指定したモデルへの生成要求が受理されました。回答の品質を検証したものではありません。");
+        }
+        return Ok(());
+    }
     if args.diagnose_local {
         let report = codebot_core::diagnose_local(&c.local, &AtomicBool::new(false));
         println!(

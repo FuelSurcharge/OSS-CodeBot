@@ -1,5 +1,9 @@
 use serde::Deserialize;
 mod api;
+mod api_diagnostics;
+pub use api_diagnostics::{
+    list_api_models, test_api_model, ApiDiagnosticError, ApiDiagnosticKind, ModelCatalog,
+};
 mod changes;
 mod conversation;
 mod streaming;

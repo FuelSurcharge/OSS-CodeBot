@@ -47,6 +47,7 @@ WindowsはユーザーのAppData、macOSはApplication Support、LinuxはXDG_CON
 - 構造化した変更案の差分表示、変更箇所を選んだ確認付き適用、競合検出、再起動後の取り消し。[使い方](docs/CHANGES.md)
 - API・ローカルAIの回答を逐次表示、GUIの停止とCLIの`--stream`・Ctrl+C、途中回答の保持。[使い方](docs/STREAMING.md)
 - ローカル実行環境・モデル形式・CPU/GPUの診断、実行ファイルとモデルの選択、専用仮想環境への導入・復旧手順。[使い方](docs/LOCAL_DIAGNOSTICS.md)
+- APIのモデル一覧と確認付き接続診断、認証・権限・モデル・利用制限・応答形式のエラー分類。[使い方](docs/API_DIAGNOSTICS.md)
 - 標準エラーへの処理完了／エラーログ（入力内容は記録しません）
 
 OpenAI・Gemini・Claude・DeepSeek・Qwen・GLM・Grok・MiMo・KimiとカスタムAPIに対応しています。設定画面で処理方式・モデルID・APIキー・接続先を指定してください。APIキーは保存せず、環境変数からも取得できます。詳しくは [API設定](docs/API.md) を参照してください。
