@@ -490,6 +490,7 @@ dependencies = [
  "clap",
  "codebot-core",
  "ctrlc",
+ "serde_json",
 ]
 
 [[package]]

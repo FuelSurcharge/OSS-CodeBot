@@ -9,6 +9,8 @@ pub use changes::{
 };
 pub use streaming::{stream_messages, StreamEnd, StreamEvent};
 mod local;
+mod local_diagnostics;
+pub use local_diagnostics::{diagnose_local, DiagnosticItem, LocalDiagnostics};
 mod transformers;
 mod workspace;
 pub use api::{execute_backend, execute_messages, ApiConfig, ApiProtocol, ApiProvider, Backend};

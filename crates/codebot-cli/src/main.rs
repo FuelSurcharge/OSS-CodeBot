@@ -22,6 +22,9 @@ struct Args {
     /// Show text as it is generated. Ctrl+C cancels the current request.
     #[arg(long, conflicts_with_all = ["proposal", "undo", "preview"])]
     stream: bool,
+    /// Diagnose the selected local runtimes and model without inference/install.
+    #[arg(long, conflicts_with_all = ["input", "interactive", "stream", "workspace", "proposal", "undo", "yes", "preview", "action"])]
+    diagnose_local: bool,
     /// Working directory for explicitly selected reference files.
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -66,6 +69,14 @@ fn run() -> Result<(), String> {
         return Err("--yesは変更の適用・取り消し時だけ指定できます".into());
     }
     let c = Config::load(args.config.as_deref())?;
+    if args.diagnose_local {
+        let report = codebot_core::diagnose_local(&c.local, &AtomicBool::new(false));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|_| "診断結果を出力できません")?
+        );
+        return Ok(());
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     if args.stream {
         let signal_cancel = cancel.clone();

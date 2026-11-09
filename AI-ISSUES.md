@@ -9,7 +9,7 @@
 
 ## P0：次に進める機能
 
-- [ ] [CB-005：ローカル推論の診断・初回セットアップ](docs/tasks/CB-005.md)
+- [ ] [CB-005：ローカル推論の診断・初回セットアップ](docs/tasks/CB-005.md) — 実装済み。Linux検証済み、Windows/macOSの独立環境での確認待ち。
 - [ ] [CB-006：公式配布元・互換性を確認したモデルカタログ](docs/tasks/CB-006.md)
 - [ ] [CB-016：Windows・macOS・LinuxのGUI・日本語入力検証](docs/tasks/CB-016.md)
 

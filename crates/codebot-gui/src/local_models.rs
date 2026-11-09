@@ -33,6 +33,8 @@ pub struct LocalModels {
     startup: Option<Startup>,
     server: Option<LocalServer>,
     progress: Option<DownloadProgress>,
+    diagnostics: crate::local_diagnostics::Diagnostics,
+    picker: Option<crate::path_picker::PathPicker>,
 }
 impl LocalModels {
     pub fn stop(&mut self) {
@@ -141,6 +143,17 @@ impl LocalModels {
         });
     }
     fn start(&mut self, ctx: &egui::Context) {
+        if self.config.engine == LocalEngine::Transformers
+            && self
+                .diagnostics
+                .report(&self.config)
+                .is_some_and(|report| !report.device_available(self.config.device))
+        {
+            self.message = Some(
+                "選択したデバイスを利用できません。診断結果とPython環境を確認してください。".into(),
+            );
+            return;
+        }
         self.server = None;
         self.message = None;
         let config = self.config.clone();
@@ -160,6 +173,12 @@ impl LocalModels {
         let mut save = false;
         let busy = request_busy || self.transfer.is_some() || self.startup.is_some();
         ui.label("対応する形式を選び、このPC上でモデルを読み込みます。");
+        self.diagnostics.ui(ui, &self.config, !busy);
+        let busy = busy || self.diagnostics.busy();
+        let available_devices = self
+            .diagnostics
+            .report(&self.config)
+            .map(|r| r.devices.clone());
         ui.add_enabled_ui(!busy, |ui| {
             let old_engine = self.config.engine;
             let engine_label = ui.label("実行方式");
@@ -176,6 +195,7 @@ impl LocalModels {
             if native {
                 let python = ui.label("Python実行ファイル（Transformers環境）");
                 if ui.add(egui::TextEdit::singleline(&mut self.config.python_path).hint_text("仮想環境のpython / python.exe").desired_width(f32::INFINITY)).labelled_by(python.id).changed() {self.server=None;}
+                if ui.button("Pythonを選択").clicked() { self.picker=Some(crate::path_picker::PathPicker::new(crate::path_picker::Target::Python,&self.config.python_path)); }
                 ui.label("torch・transformers・accelerate・safetensors・huggingface_hubが必要です。");
             }
             ui.add_space(8.0);
@@ -188,6 +208,7 @@ impl LocalModels {
             if self.config.preset!=LocalPreset::Custom {ui.label("このモデル名の配布先・実行方式への対応は未確認です。対応形式のモデルを指定してください。");}
             let path=ui.label(if native {"公式形式モデルのフォルダ（safetensors・config・tokenizer）"} else {"ローカルモデルのパス（GGUF）"});
             if ui.add(egui::TextEdit::singleline(&mut self.config.model_path).hint_text(if native {"/path/to/model-folder"} else {"/path/to/model.gguf"}).desired_width(f32::INFINITY)).labelled_by(path.id).changed() {self.server=None;}
+            if ui.button(if native {"モデルフォルダを選択"} else {"GGUFファイルを選択"}).clicked() { self.picker=Some(crate::path_picker::PathPicker::new(if native {crate::path_picker::Target::ModelFolder} else {crate::path_picker::Target::ModelFile},&self.config.model_path)); }
             ui.add_space(8.0);
             let source=ui.label(if native {"またはHugging FaceのリポジトリURL / ID"} else {"またはHugging FaceのファイルURL"});
             ui.add(egui::TextEdit::singleline(&mut self.config.hf_url).hint_text(if native {"https://huggingface.co/owner/model または owner/model"} else {"https://huggingface.co/owner/repo/resolve/main/model.gguf"}).desired_width(f32::INFINITY)).labelled_by(source.id);
@@ -210,13 +231,18 @@ impl LocalModels {
             if !native {
                 let runtime=ui.label("llama-server 実行ファイル");
                 ui.add(egui::TextEdit::singleline(&mut self.config.server_path).hint_text("llama-server のインストール先").desired_width(f32::INFINITY)).labelled_by(runtime.id);
+                if ui.button("llama-serverを選択").clicked() { self.picker=Some(crate::path_picker::PathPicker::new(crate::path_picker::Target::Server,&self.config.server_path)); }
             }
             ui.collapsing("推論設定",|ui| {
                 if native {
                     egui::ComboBox::from_id_salt("model-device").selected_text(self.config.device.as_str()).show_ui(ui,|ui| {
-                        for device in [ModelDevice::Auto,ModelDevice::Cpu,ModelDevice::Cuda,ModelDevice::Mps] {ui.selectable_value(&mut self.config.device,device,device.as_str());}
+                        for device in [ModelDevice::Auto,ModelDevice::Cpu,ModelDevice::Cuda,ModelDevice::Mps] {
+                            let available=available_devices.as_ref().map(|list| if device==ModelDevice::Auto {!list.is_empty()} else {list.contains(&device)}).unwrap_or(matches!(device,ModelDevice::Auto|ModelDevice::Cpu));
+                            ui.add_enabled_ui(available,|ui| {ui.selectable_value(&mut self.config.device,device,device.as_str());});
+                        }
                     });
                     ui.label("autoはCUDA → MPS → CPUの順で選択します。実際の利用可否はPyTorch環境に依存します。");
+                    ui.label("GPUは実行環境の診断後、利用を確認したものを選択できます。");
                 }
                 ui.horizontal(|ui| {ui.label("コンテキスト長");ui.add(egui::DragValue::new(&mut self.config.context_size).range(512..=131072));});
                 ui.horizontal(|ui| {ui.label("CPUスレッド数");ui.add(egui::DragValue::new(&mut self.config.threads).range(1..=256));});
@@ -231,6 +257,31 @@ impl LocalModels {
                 if ui.button("ローカル設定を保存").clicked() {save=true;}
             });
         });
+        ui.collapsing("初回セットアップ・復旧手順",|ui| {
+            ui.label("llama.cpp：公式リリースからOS・CPU/GPUに合うパッケージを展開し、llama-serverを選択してください。");
+            ui.hyperlink_to("llama.cpp公式リリース","https://github.com/ggml-org/llama.cpp/releases");
+            ui.label("Transformers：専用の仮想環境を作り、そのPythonへリポジトリのrequirements.txtを導入してください。既存環境の一括更新は行いません。");
+            ui.label(if cfg!(windows) {"作成：python -m venv .venv-transformers\n導入：.venv-transformers\\Scripts\\python.exe -m pip install -r scripts/transformers/requirements.txt"} else {"作成：python3 -m venv .venv-transformers\n導入：.venv-transformers/bin/python -m pip install -r scripts/transformers/requirements.txt"});
+            ui.label("CUDA用PyTorchは公式のOS・CUDA対応表で選択してください。GPUが使えない場合はCPU、依存不整合の場合は新しい仮想環境で再作成してPythonパスを切り替えます。");
+            ui.hyperlink_to("PyTorch公式の導入手順","https://pytorch.org/get-started/locally/");
+            ui.label("自動インストールは行いません。ダウンロード容量は選ぶPyTorch・モデルにより異なります。");
+        });
+        if !busy {
+            if let Some(picker) = &mut self.picker {
+                if let Some(path) = picker.ui(ui.ctx()) {
+                    match picker.target {
+                        crate::path_picker::Target::ModelFile
+                        | crate::path_picker::Target::ModelFolder => self.config.model_path = path,
+                        crate::path_picker::Target::Python => self.config.python_path = path,
+                        crate::path_picker::Target::Server => self.config.server_path = path,
+                    }
+                    self.server = None;
+                }
+                if !picker.is_open() {
+                    self.picker = None;
+                }
+            }
+        }
         if let Some(task) = &self.transfer {
             if let Some(p) = self.progress {
                 let mib = p.received as f64 / 1048576.0;

@@ -3,6 +3,7 @@
 既存の「ローカル診断」は単純なルールベース処理です。
 「ローカルAI」は、GGUF向けのllama.cpp方式と、公式safetensors向けのTransformers方式から選べます。
 まずllama.cpp方式について説明します。推論には別途 [llama.cppのllama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) が必要です。
+導入状況はGUIの「実行環境を診断」またはCLIの`--diagnose-local`で確認できます。[診断・復旧手順](LOCAL_DIAGNOSTICS.md)。
 各OS向けに配布・ビルドされた実行ファイルを用意し、GUIでパスを設定してください。
 エンジンの自動インストールは行いません。モデルのアーキテクチャが使用するllama.cppに対応している必要があります。
 

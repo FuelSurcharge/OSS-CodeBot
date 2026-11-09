@@ -13,8 +13,10 @@ use std::{
 };
 mod change_panel;
 mod chat_storage;
+mod local_diagnostics;
 mod local_models;
 mod markdown;
+mod path_picker;
 mod ui_preferences;
 mod workspace_panel;
 use local_models::LocalModels;
