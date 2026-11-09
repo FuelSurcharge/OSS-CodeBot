@@ -22,6 +22,7 @@ impl WorkspacePanel {
                 codebot_core::AnalysisAction::Explain,
                 codebot_core::AnalysisAction::Diagnose,
                 codebot_core::AnalysisAction::Review,
+                codebot_core::AnalysisAction::Fix,
             ] {
                 ui.selectable_value(&mut self.action, action, action.label());
             }

@@ -32,6 +32,7 @@ pub fn show(
                 ui.set_max_width(width);
                 ui.style_mut().override_text_style = Some(egui::TextStyle::Body);
                 CommonMarkViewer::new()
+                    .syntax_theme_light("InspiredGitHub")
                     .default_width(Some(width.max(1.0) as usize))
                     .explicit_image_uri_scheme(true)
                     .show(ui, cache, text);

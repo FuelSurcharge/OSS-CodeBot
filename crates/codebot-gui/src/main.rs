@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
 };
+mod change_panel;
 mod chat_storage;
 mod local_models;
 mod markdown;
@@ -139,6 +140,8 @@ struct App {
     archive_path_edit: String,
     workspace_panel: workspace_panel::WorkspacePanel,
     files_open: bool,
+    change_panel: change_panel::ChangePanel,
+    changes_open: bool,
 }
 impl Default for App {
     fn default() -> Self {
@@ -171,6 +174,8 @@ impl Default for App {
             archive_path_edit: String::new(),
             workspace_panel: workspace_panel::WorkspacePanel::default(),
             files_open: false,
+            change_panel: change_panel::ChangePanel::default(),
+            changes_open: false,
         }
     }
 }
@@ -412,6 +417,10 @@ impl App {
                     app.save_chats = preferences.save_chats;
                     app.archive_path_override = preferences.chat_archive_path;
                     app.archive_path_edit = app.archive_path_override.clone();
+                    app.change_panel.restore_location(
+                        preferences.last_change_root,
+                        preferences.last_change_journal,
+                    );
                 }
                 Err(e) => app.preferences_error = Some(e),
             }
@@ -427,6 +436,8 @@ impl App {
         self.save_preferences();
     }
     fn save_preferences(&mut self) {
+        let (last_change_root, last_change_journal) =
+            self.change_panel.last_location().unwrap_or_default();
         self.preferences_error = match &self.preferences_path {
             Some(path) => UiPreferences {
                 font: self.font,
@@ -435,6 +446,8 @@ impl App {
                 local: self.local.config.clone(),
                 save_chats: self.save_chats,
                 chat_archive_path: self.archive_path_override.clone(),
+                last_change_root,
+                last_change_journal,
             }
             .save(path)
             .err(),
@@ -446,10 +459,16 @@ impl App {
         self.active = self.sessions.len() - 1;
         self.settings = false;
         self.files_open = false;
+        self.changes_open = false;
         self.delete_confirm = false;
         self.sessions_dirty = true;
     }
     fn send(&mut self, ctx: &egui::Context) {
+        if self.change_panel.is_busy() {
+            self.sessions[self.active].notice =
+                Some("ファイル操作の完了後に送信してください。下書きは保持しています。".into());
+            return;
+        }
         if self.pending.is_some() || self.sessions[self.active].draft.trim().is_empty() {
             return;
         }
@@ -604,7 +623,9 @@ impl App {
             self.sessions[self.active].attachments.remove(index);
             self.sessions_dirty = true;
         }
-        let enabled = self.pending.is_none() && !self.sessions[self.active].draft.trim().is_empty();
+        let enabled = self.pending.is_none()
+            && !self.change_panel.is_busy()
+            && !self.sessions[self.active].draft.trim().is_empty();
         let input_height = 2.0 * ui.text_style_height(&egui::TextStyle::Body);
         egui::Frame::new()
             .fill(RAISED)
@@ -630,7 +651,7 @@ impl App {
                                             &mut self.sessions[self.active].draft,
                                         )
                                         .id_salt(("draft", self.active))
-                                        .hint_text("エラーログを貼り付けてください")
+                                        .hint_text("メッセージを入力")
                                         .font(egui::TextStyle::Body)
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(2)
@@ -737,6 +758,7 @@ impl App {
     fn conversation(&mut self, ui: &mut egui::Ui) {
         let mut reference = None;
         let mut retry = false;
+        let mut proposal_open = None;
         egui::ScrollArea::vertical()
             .id_salt(("chat", self.active))
             .stick_to_bottom(true)
@@ -792,6 +814,12 @@ impl App {
                             if self.copied == Some((self.active, index)) {
                                 ui.label(RichText::new("コピーしました").size(12.0).color(MUTED));
                             }
+                            if body.contains("\"changes\"")
+                                && body.contains("\"version\"")
+                                && ui.button("変更案を確認").clicked()
+                            {
+                                proposal_open = Some(body.to_owned());
+                            }
                             if index + 1 == self.sessions[self.active].messages.len()
                                 && self.sessions[self.active].retry_input.is_some()
                                 && ui
@@ -834,6 +862,20 @@ impl App {
                 session.notice = Some(
                     "未送信の下書きがあります。送信または退避してから再試行してください。".into(),
                 );
+            }
+        }
+        if let Some(proposal) = proposal_open {
+            match self.change_panel.set_proposal(
+                self.sessions[self.active].workspace_root.as_deref(),
+                &proposal,
+            ) {
+                Ok(()) => {
+                    self.change_panel.preview(ui.ctx());
+                    self.changes_open = true;
+                    self.files_open = false;
+                    self.settings = false;
+                }
+                Err(error) => self.sessions[self.active].notice = Some(error),
             }
         }
     }
@@ -1024,6 +1066,19 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
+        if let Some(root) = self.change_panel.poll() {
+            for session in &mut self.sessions {
+                if session.workspace_root.as_deref() == Some(&root) {
+                    session.history.clear();
+                    session.attachments.clear();
+                    session.analysis_action = None;
+                    session.history_enabled = false;
+                    session.retry_input = None;
+                    session.notice = Some("ファイル操作を実行しました。参照ファイルを選び直してください。画面の会話と下書きは保持しています。".into());
+                }
+            }
+            self.sessions_dirty = true;
+        }
         if self.local.poll() {
             self.save_preferences();
         }
@@ -1036,6 +1091,7 @@ impl eframe::App for App {
         // Consume the shortcut before TextEdit to avoid inserting a newline on submit.
         if !self.settings
             && !self.files_open
+            && !self.changes_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
         {
             self.send(ctx);
@@ -1103,6 +1159,8 @@ impl eframe::App for App {
                                 if response.clicked() {
                                     self.active = index;
                                     self.settings = false;
+                                    self.files_open = false;
+                                    self.changes_open = false;
                                     self.delete_confirm = false;
                                     self.sessions_dirty = true;
                                 }
@@ -1133,6 +1191,8 @@ impl eframe::App for App {
                             .clicked()
                         {
                             self.settings = true;
+                            self.files_open = false;
+                            self.changes_open = false;
                         }
                     });
                 });
@@ -1168,6 +1228,8 @@ impl eframe::App for App {
                                     if ui.selectable_label(i == self.active, s.title()).clicked() {
                                         self.active = i;
                                         self.settings = false;
+                                        self.files_open = false;
+                                        self.changes_open = false;
                                         self.delete_confirm = false;
                                         self.sessions_dirty = true;
                                         ui.close_menu();
@@ -1175,25 +1237,23 @@ impl eframe::App for App {
                                 }
                             });
                         }
-                        ui.label(
-                            RichText::new(if self.settings {
-                                "設定".into()
-                            } else {
-                                self.sessions[self.active].title()
-                            })
-                            .size(13.0)
-                            .color(MUTED),
-                        );
+                        let title = if self.settings { "設定".into() } else if self.changes_open { "変更の確認".into() }
+                            else if self.files_open { "参照ファイル".into() } else { self.sessions[self.active].title() };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("ファイル").clicked() { self.files_open = !self.files_open; self.settings = false; }
                             if icon_button(ui, Icon::Settings, "設定", true, false).clicked() {
                                 self.files_open = false;
+                                self.changes_open = false;
                                 self.settings = !self.settings;
                             }
                             if icon_button(ui, Icon::New, "新しいチャット", true, false).clicked()
                             {
                                 self.new_chat();
                             }
+                            if ui.button("ファイル").clicked() { self.files_open = !self.files_open; self.settings = false; self.changes_open = false; }
+                            if ui.button("変更").clicked() { self.changes_open = !self.changes_open; self.settings = false; self.files_open = false; }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(title).size(13.0).color(MUTED)).truncate());
+                            });
                         });
                     });
                     let bounds = ui.available_rect_before_wrap();
@@ -1201,7 +1261,16 @@ impl eframe::App for App {
                     let left = bounds.center().x - width / 2.0;
                     let composer_width = (bounds.width() - 32.0).min(COMPOSER_WIDTH).max(200.0);
                     let composer_left = bounds.center().x - composer_width / 2.0;
-                    if self.files_open {
+                    if self.changes_open {
+                        let rect = egui::Rect::from_min_max(egui::pos2(left,bounds.top()),egui::pos2(left+width,bounds.bottom()));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                self.change_panel.ui(ui,self.pending.is_none());
+                                if let Some(error) = &self.preferences_error { ui.colored_label(ui.visuals().error_fg_color,error); }
+                                if ui.button("チャットに戻る").clicked() { self.changes_open = false; }
+                            });
+                        });
+                    } else if self.files_open {
                         let rect = egui::Rect::from_min_max(egui::pos2(left, bounds.top()), egui::pos2(left+width, bounds.bottom()));
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1242,7 +1311,7 @@ impl eframe::App for App {
                             ui.label(RichText::new("新しいチャット").size(28.0));
                             ui.add_space(8.0);
                             ui.label(
-                                RichText::new("ログを貼り付けて、原因を調べましょう。")
+                                RichText::new("コードやログを一緒に確認しましょう。")
                                     .size(14.0)
                                     .color(MUTED),
                             );
@@ -1279,6 +1348,9 @@ impl eframe::App for App {
                     }
                 });
             });
+        if self.change_panel.take_settings_changed() {
+            self.save_preferences();
+        }
         self.flush_chats();
     }
 }
@@ -1453,6 +1525,9 @@ fn main() -> eframe::Result {
             style
                 .text_styles
                 .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
             cc.egui_ctx.set_style(style);
             Ok(Box::new(app))
         }),

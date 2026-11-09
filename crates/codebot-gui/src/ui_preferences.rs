@@ -22,6 +22,8 @@ pub struct UiPreferences {
     pub local: LocalConfig,
     pub save_chats: bool,
     pub chat_archive_path: String,
+    pub last_change_root: String,
+    pub last_change_journal: String,
 }
 
 impl UiPreferences {
@@ -201,5 +203,26 @@ mod tests {
         assert_eq!(restored.local.model_path, "models/local.gguf");
         assert_eq!(restored.local.server_path, "tools/llama-server");
         assert!(!fs::read_to_string(path).unwrap().contains("hf_token"));
+    }
+    #[test]
+    fn recovery_record_locator_survives_restart() {
+        let directory = TestDir::new();
+        let path = directory.0.join("gui-preferences.toml");
+        let preferences = UiPreferences {
+            last_change_root: directory.0.join("project").to_string_lossy().into_owned(),
+            last_change_journal: directory
+                .0
+                .join("change.json")
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        };
+        preferences.save(&path).unwrap();
+        let restored = UiPreferences::load(&path).unwrap();
+        assert_eq!(restored.last_change_root, preferences.last_change_root);
+        assert_eq!(
+            restored.last_change_journal,
+            preferences.last_change_journal
+        );
     }
 }
