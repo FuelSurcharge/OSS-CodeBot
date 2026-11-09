@@ -1,0 +1,75 @@
+name: Verification packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      development:
+        description: Internal verification build (license still undecided)
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      CODEBOT_DEVELOPMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.development && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check tag and public license prerequisites
+        shell: python
+        run: |
+          from pathlib import Path
+          import os, tomllib
+          version = tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version']
+          if os.environ['GITHUB_REF_TYPE'] == 'tag' and os.environ['GITHUB_REF_NAME'] != 'v' + version:
+              raise SystemExit('Tag must match the workspace package version')
+          if os.environ['CODEBOT_DEVELOPMENT'] != 'true' and not Path('LICENSE').is_file():
+              raise SystemExit('CodeBot license is undecided. Add the owner-selected LICENSE and Cargo metadata before building public distribution artifacts.')
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libssl-dev pkg-config
+      - run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - run: cargo install cargo-about --version 0.9.3 --locked --features cli
+      - run: python scripts/collect_notices.py --target ${{ matrix.target }} --out target/notices.json
+      - run: python -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Package binaries and notices
+        shell: python
+        env:
+          CODEBOT_TARGET: ${{ matrix.target }}
+        run: |
+          import os, subprocess
+          args = ['python', 'scripts/package_release.py', '--target', os.environ['CODEBOT_TARGET'], '--notices', 'target/notices.json']
+          if os.environ['CODEBOT_DEVELOPMENT'] == 'true':
+              args.append('--development')
+          subprocess.run(args, check=True)
+      - uses: actions/upload-artifact@v4
+        if: env.CODEBOT_DEVELOPMENT != 'true'
+        with:
+          name: CodeBot-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

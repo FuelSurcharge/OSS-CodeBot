@@ -70,6 +70,8 @@ cargo build --workspace --locked
 
 3 OSのCI定義を同梱しています。GUIの起動・日本語入力・設定・エラー表示は各OSで別途操作検証が必要です。
 
+検証対象と実施状況は[OS別の検証表](docs/PLATFORM_VALIDATION.md)、配布形式・生成・チェックサム・更新/削除は[配布手順](docs/RELEASING.md)、開発と不具合報告は[CONTRIBUTING](CONTRIBUTING.md)を参照してください。配布物の生成スクリプトと4targetのCI定義を追加していますが、本体のライセンスは未決定で、現在は内部検証用です。
+
 設計は [docs/OSS_CodeBot_DESIGN.md](docs/OSS_CodeBot_DESIGN.md) を参照してください。
 同梱のNoto Sans JPはSIL Open Font Licenseです。[assets/OFL.txt](assets/OFL.txt) を参照してください。
 フォント取得元は google/fonts の ofl/notosansjp です。アプリ本体のライセンスは未決定です。

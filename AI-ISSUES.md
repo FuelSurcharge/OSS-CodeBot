@@ -11,11 +11,11 @@
 
 - [ ] [CB-005：ローカル推論の診断・初回セットアップ](docs/tasks/CB-005.md) — 実装済み。Linux検証済み、Windows/macOSの独立環境での確認待ち。
 - [ ] [CB-006：公式配布元・互換性を確認したモデルカタログ](docs/tasks/CB-006.md)
-- [ ] [CB-016：Windows・macOS・LinuxのGUI・日本語入力検証](docs/tasks/CB-016.md)
+- [ ] [CB-016：Windows・macOS・LinuxのGUI・日本語入力検証](docs/tasks/CB-016.md) — Linuxの主要機能を確認済み。検証表を追加、他OS/IME/高DPIなどは未確認。
 
 ## P1：開発支援と運用の拡張
 
-- [ ] [CB-017：3 OS向け配布パッケージ・リリース手順](docs/tasks/CB-017.md)
+- [ ] [CB-017：3 OS向け配布パッケージ・リリース手順](docs/tasks/CB-017.md) — 生成処理・4target CI・手順を実装。Linux版を展開して起動確認。本体ライセンス、他OS/新規環境検証が残る。
 
 ## 将来構想：別プロジェクト
 
