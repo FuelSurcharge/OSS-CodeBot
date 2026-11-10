@@ -1,6 +1,6 @@
 use eframe::egui::{self, Response, Stroke, Ui, Widget, WidgetText};
 
-/// Keep egui's checkbox interaction and accessibility, with a double-ring mark.
+/// Keep egui's checkbox interaction and accessibility, with a ring and filled dot.
 pub struct Checkbox<'a> {
     checked: &'a mut bool,
     text: WidgetText,
@@ -53,7 +53,7 @@ impl Widget for Checkbox<'_> {
                 ui.painter().circle_filled(icon.center(), radius, fill);
                 ui.painter().circle_stroke(icon.center(), radius, stroke);
                 ui.painter()
-                    .circle_stroke(icon.center(), radius * 0.45, stroke);
+                    .circle_filled(icon.center(), radius * 0.45, crate::ACCENT);
             } else {
                 ui.painter().rect(
                     icon.expand(visual.expansion),
