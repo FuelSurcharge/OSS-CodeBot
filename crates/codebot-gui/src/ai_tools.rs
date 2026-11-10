@@ -265,7 +265,7 @@ impl ToolPanel {
                 });
             ui.add_enabled(
                 !busy,
-                egui::Checkbox::new(
+                crate::checkbox::Checkbox::new(
                     &mut self.confirm_result,
                     "この結果を上記のAIへ送ることを確認しました",
                 ),

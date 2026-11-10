@@ -219,7 +219,10 @@ impl ChangePanel {
                             changed |= ui
                                 .add_enabled(
                                     self.task.is_none(),
-                                    egui::Checkbox::new(&mut self.selected[file][edit], label),
+                                    crate::checkbox::Checkbox::new(
+                                        &mut self.selected[file][edit],
+                                        label,
+                                    ),
                                 )
                                 .changed();
                         }
@@ -304,10 +307,10 @@ impl ChangePanel {
                     });
             }
             if self.prepared.is_some() || self.undo_mode {
-                ui.checkbox(
+                ui.add(crate::checkbox::Checkbox::new(
                     &mut self.confirmed,
                     "表示した差分と作業フォルダを確認しました",
-                );
+                ));
                 if ui
                     .add_enabled(
                         can_mutate && self.confirmed && !self.journal.trim().is_empty(),

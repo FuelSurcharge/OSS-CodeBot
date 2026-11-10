@@ -342,7 +342,7 @@ impl CommandPanel {
                 ));
                 ui.add_enabled(
                     can_run,
-                    egui::Checkbox::new(
+                    crate::checkbox::Checkbox::new(
                         &mut self.confirmed,
                         "実行内容・作業場所・環境変数名を確認しました",
                     ),

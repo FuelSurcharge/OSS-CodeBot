@@ -468,7 +468,10 @@ impl GithubPanel {
                         )
                         .changed();
                     edit |= ui
-                        .checkbox(&mut self.draft, "下書きのPRとして作成")
+                        .add(crate::checkbox::Checkbox::new(
+                            &mut self.draft,
+                            "下書きのPRとして作成",
+                        ))
                         .changed();
                 }
                 ui.label("投稿本文");
@@ -538,7 +541,10 @@ impl GithubPanel {
                 }
                 ui.add_enabled(
                     can_post && !busy && !recorded,
-                    egui::Checkbox::new(&mut self.confirmed, "投稿先と本文を確認しました"),
+                    crate::checkbox::Checkbox::new(
+                        &mut self.confirmed,
+                        "投稿先と本文を確認しました",
+                    ),
                 );
                 if ui
                     .add_enabled(

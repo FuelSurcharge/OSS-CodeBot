@@ -258,7 +258,7 @@ impl PluginPanel {
             ui.label("導入後は無効の状態です。選択して有効にしてから入力を渡します。");
             ui.add_enabled(
                 !busy && manifest.supported(),
-                egui::Checkbox::new(
+                crate::checkbox::Checkbox::new(
                     &mut self.confirmed,
                     "要求する権限とモジュールを確認しました",
                 ),
@@ -454,7 +454,7 @@ impl PluginPanel {
             ui.add(egui::Label::new(format!("削除対象：{} / {}\nmanifest.json・plugin.wasm・state.jsonの登録データを削除します。",plan.root().display(),plan.id())).wrap());
             ui.add_enabled(
                 !busy,
-                egui::Checkbox::new(&mut self.confirmed, "削除する拡張を確認しました"),
+                crate::checkbox::Checkbox::new(&mut self.confirmed, "削除する拡張を確認しました"),
             );
             if ui
                 .add_enabled(

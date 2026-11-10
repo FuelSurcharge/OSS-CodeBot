@@ -145,7 +145,7 @@ impl ApiDiagnostics {
         ui.add(egui::Label::new(format!("{} / {}\n{}\n接続確認は固定の診断入力を送信します。出力上限は{}トークンで、API料金が発生する場合があります。",backend.label(),api.model,destination,api.max_output_tokens)).wrap());
         ui.add_enabled(
             enabled && self.task.is_none(),
-            egui::Checkbox::new(&mut self.confirm, "生成要求による接続確認を実行する"),
+            crate::checkbox::Checkbox::new(&mut self.confirm, "生成要求による接続確認を実行する"),
         );
         if ui
             .add_enabled(

@@ -51,6 +51,8 @@ Use LINE Seed JP Regular 400 for all UI text by default, including emphasis labe
 
 The default theme is explicitly Light, independent of the OS preference. Use a blue background with a white arrow for enabled send; disabled send uses a muted gray-blue background. Keep dark text on the light chat surface, and blue focus indicators.
 
+Application checkboxes display two concentric blue outline circles (◎) when selected. Draw the indicator with vector circles so it stays consistent across fonts and display scales. Use the shared `checkbox` widget for selection and confirmation controls, preserving egui's label click, keyboard, focus, disabled state, and checkbox accessibility semantics.
+
 API settings live at the top of Settings: service, model ID, base URL, protocol for custom endpoints, masked in-memory API key, environment variable name, output limit and timeout. Persist only non-secret API profiles. Clear the in-memory key when changing provider or endpoint. Show save errors beside the save action.
 
 Local AI has a separate configuration panel for a model path or HF file URL, verification/download progress, llama-server path, load/stop controls, and advanced runtime settings. Model-name presets without verified sources must be visibly marked unverified and must never invent a repository URL. Downloads are explicit; inference sends data only to the owned loopback server. Keep the existing no-example-prompts rule.

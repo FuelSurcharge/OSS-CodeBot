@@ -262,7 +262,10 @@ impl GitPanel {
                                 file.working,
                                 serde_json::to_string(&file.path).unwrap_or_default()
                             );
-                            if ui.checkbox(&mut selected, label).changed() {
+                            if ui
+                                .add(crate::checkbox::Checkbox::new(&mut selected, label))
+                                .changed()
+                            {
                                 if selected {
                                     self.selected.insert(file.path.clone());
                                 } else {
@@ -414,7 +417,10 @@ impl GitPanel {
             }
             ui.add_enabled(
                 can_mutate,
-                egui::Checkbox::new(&mut self.confirmed, "対象・ブランチ・差分を確認しました"),
+                crate::checkbox::Checkbox::new(
+                    &mut self.confirmed,
+                    "対象・ブランチ・差分を確認しました",
+                ),
             );
             if ui
                 .add_enabled(

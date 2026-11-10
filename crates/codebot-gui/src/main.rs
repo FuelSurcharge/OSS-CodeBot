@@ -15,6 +15,7 @@ mod ai_tools;
 mod api_diagnostics;
 mod change_panel;
 mod chat_storage;
+mod checkbox;
 mod command_panel;
 mod git_panel;
 mod github_panel;
@@ -358,7 +359,10 @@ impl App {
         if ui
             .add_enabled(
                 self.pending.is_none(),
-                egui::Checkbox::new(&mut self.save_chats, "チャットと下書きをこのPCに保存する"),
+                crate::checkbox::Checkbox::new(
+                    &mut self.save_chats,
+                    "チャットと下書きをこのPCに保存する",
+                ),
             )
             .changed()
         {
@@ -422,10 +426,10 @@ impl App {
         ui.add_space(8.0);
         ui.label("書き出し先のファイルパス");
         ui.text_edit_singleline(&mut self.export_path);
-        ui.checkbox(
+        ui.add(crate::checkbox::Checkbox::new(
             &mut self.export_overwrite,
             "書き出し先の既存ファイルの上書きを許可する",
-        );
+        ));
         ui.horizontal(|ui| {
             for (label, markdown) in [("Markdownで書き出す", true), ("JSONで書き出す", false)]
             {
@@ -876,7 +880,10 @@ impl App {
                 if ui
                     .add_enabled(
                         self.pending.is_none(),
-                        egui::Checkbox::new(&mut session.history_enabled, "会話履歴を含める"),
+                        crate::checkbox::Checkbox::new(
+                            &mut session.history_enabled,
+                            "会話履歴を含める",
+                        ),
                     )
                     .changed()
                     && session.history_enabled
@@ -1154,7 +1161,10 @@ impl App {
         ui.add(egui::TextEdit::singleline(&mut api.api_key_env).desired_width(f32::INFINITY))
             .labelled_by(env.id);
         if self.backend == Backend::Custom {
-            ui.checkbox(&mut api.anonymous, "キーなし接続を許可（ローカルAPIなど）");
+            ui.add(crate::checkbox::Checkbox::new(
+                &mut api.anonymous,
+                "キーなし接続を許可（ローカルAPIなど）",
+            ));
         }
         ui.horizontal(|ui| {
             ui.label("出力トークン上限");

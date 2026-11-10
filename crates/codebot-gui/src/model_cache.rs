@@ -198,7 +198,7 @@ impl CachePanel {
                 });
             ui.add_enabled(
                 available,
-                egui::Checkbox::new(&mut self.confirmed, "削除対象を確認しました"),
+                crate::checkbox::Checkbox::new(&mut self.confirmed, "削除対象を確認しました"),
             );
             if ui
                 .add_enabled(
